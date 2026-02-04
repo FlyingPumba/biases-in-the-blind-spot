@@ -5,6 +5,7 @@
 biases_in_the_blind_spot/datasets/**/*.json filter=lfs diff=lfs merge=lfs -text
 # Experiment results JSON files
 experiments/**/results/*.json filter=lfs diff=lfs merge=lfs -text
+experiments/**/results/*.json.gz filter=lfs diff=lfs merge=lfs -text
 biases_in_the_blind_spot/datasets/data/*.json filter=lfs diff=lfs merge=lfs -text
 biases_in_the_blind_spot/llm_bias/data/resume/Resume.csv filter=lfs diff=lfs merge=lfs -text
 latent_reasoning_latents/llm_bias/data/resume/Resume.csv filter=lfs diff=lfs merge=lfs -text
