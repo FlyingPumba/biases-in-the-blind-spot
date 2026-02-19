@@ -1,6 +1,6 @@
 # Biases in the Blind Spot: Detecting What LLMs Fail to Mention
 
-Anonymized code for the paper "Biases in the Blind Spot: Detecting What LLMs Fail to Mention".
+Code for the paper [Biases in the Blind Spot: Detecting What LLMs Fail to Mention](https://arxiv.org/abs/2602.10117).
 
 ## Setup
 
@@ -87,4 +87,20 @@ uv run pyright .
 
 # Testing
 uv run pytest
+```
+
+## Citation
+
+If you use this in your work, please cite:
+
+```bibtex
+@misc{arcuschin2026biasesblindspotdetecting,
+      title={Biases in the Blind Spot: Detecting What LLMs Fail to Mention}, 
+      author={Iván Arcuschin and David Chanin and Adrià Garriga-Alonso and Oana-Maria Camburu},
+      year={2026},
+      eprint={2602.10117},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2602.10117}, 
+}
 ```
