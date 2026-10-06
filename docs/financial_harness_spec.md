@@ -12,7 +12,8 @@ Normative keywords: MUST, MUST NOT, SHOULD, MAY. Items marked **[D-n]** are user
 - `[tool.hatch.build.targets.wheel] packages = ["biases_in_the_blind_spot", "financial_llm_harness"]`
 - `[project.scripts] financial-harness = "financial_llm_harness.cli:main"`
 - pyright `include` += `"financial_llm_harness/**/*.py"`
-- dependencies += `pyyaml`; dev group += `hypothesis`. Use no ORM (stdlib `sqlite3`) and no pydantic (dataclasses plus explicit validators). Use numpy, scipy and statsmodels, which are already present.
+- dependencies += `pyyaml`, `httpx` (already installed transitively by `openai`; declared because the Gemini native adapter imports it directly). Dev group += `hypothesis`, `jsonschema` (report-schema tests only). Use no ORM (stdlib `sqlite3`) and no pydantic (dataclasses plus explicit validators). Use numpy, scipy and statsmodels, which are already present. Use no plotting library for harness reports: figures are written as SVG by `reporting/svg.py` (§32A.6).
+- Every OpenAI-compatible provider (OpenAI, DeepSeek, Qwen, Kimi, Gemini compatibility mode, OpenRouter, self-hosted) goes through the existing `openai` SDK with a provider-specific `base_url`. There are no per-vendor SDKs.
 - CI (`ruff format --check`, `ruff check`, `pyright`, `pytest`, `uv build`) MUST stay green at every milestone.
 
 0.3 Reuse by import (do not copy):
@@ -78,6 +79,8 @@ The harness covers fundamental judgement, investment decisions, summarisation, q
 11. Every confirmatory experiment includes the controls in §22.
 12. Response mode (`reasoning_mode`, contract, enforcement, `max_output_tokens`, temperature policy) is identical across arms, and across models within an experiment, unless model is a declared stratum.
 13. Code runs only inside the sandbox (§13). If no sandbox is available, the status is SANDBOX_FAILURE and code never runs on the host.
+14. The runner refuses to send a manifest whose `data_classification` is not allowed for the target provider and region in `provider_policy.yaml` (§20.5).
+15. Every report file is a pure function of `db/run.sqlite` plus artefacts. Re-rendering is byte-identical (§32A.8).
 
 ---
 
@@ -121,6 +124,7 @@ domain: fundamental
 task_family: stock_add
 concept: momentum_12m
 research_question: <str>
+data_classification: synthetic          # synthetic | licensed | confidential (§20.5)
 mandate: {id: M1, version: 1, text: <prompt-visible objective>}
 hypothesis:
   primary_feature: decision_add
@@ -144,7 +148,7 @@ oracle_spec: {...}                      # §17
 sampling_spec:
   R: 1
   temperature_policy: {mode: fixed, temperature: 0.7}   # [D-5]
-  models: [{model_key, provider, model, revision, upstream_routing, params}]
+  models: [{model_key, provider, model, region, transport, thinking, revision, upstream_routing, params, probe_ref}]   # §20
   order: randomised_blocks
 statistical_spec: {test, ci_method: case_bootstrap_percentile, bootstrap_B: 10000, permutation_B: 10000, sequential: none}
 budget: {max_calls, max_input_tokens, max_output_tokens, max_cost_usd, pricing_table_version}
@@ -464,37 +468,197 @@ confidence_threshold: 0.7
 
 ---
 
-## 20. Model adapters
+## 20. Model adapters and provider registry
+
+### 20.1 Adapters
+
+There are exactly four adapter classes. Provider differences are **data** in `providers.yaml`, not subclasses.
+
+| Adapter | Transport | Providers |
+|---|---|---|
+| `openai_compatible` | OpenAI Chat Completions schema via the `openai` SDK, with a per-provider `base_url` | OpenAI, DeepSeek, Qwen (Alibaba Cloud Model Studio), Kimi (Moonshot AI), Gemini compatibility mode, OpenRouter, self-hosted (vLLM / SGLang) |
+| `anthropic` | Anthropic Messages API (existing `anthropic` SDK) | Anthropic |
+| `gemini_native` | `POST {base_url}/models/{model}:generateContent`, header `x-goog-api-key`, via `httpx` | Google Gemini (default transport) |
+| `fake` | In-process; deterministic, with a configurable effect | Tests and CI |
+
+Gemini defaults to the native transport because it exposes the generation config (seed, response schema, thinking configuration, thought summaries) and detailed finish reasons without a compatibility layer in between. The compatibility mode is allowed with `transport: openai_compat`, and those models form a separate stratum (§2.12).
+
+### 20.2 Provider registry (`financial_llm_harness/models/providers.yaml`)
+
+The registry is versioned and dated. The values below were checked on 2026-10-06 via search results, because the primary documentation sites were unreachable from the build container. `probe` (§20.4) re-verifies them before any manifest is frozen.
+
+```yaml
+registry_version: 2026-10-06
+providers:
+  openai:
+    adapter: openai_compatible
+    base_url: https://api.openai.com/v1
+    key_env: OPENAI_API_KEY
+    docs: https://platform.openai.com/docs/api-reference
+    batch: openai_batch
+    serving: first_party
+  anthropic:
+    adapter: anthropic
+    base_url: https://api.anthropic.com
+    key_env: ANTHROPIC_API_KEY
+    docs: https://docs.claude.com/en/api/overview
+    batch: anthropic_message_batches
+    serving: first_party
+  google:                                  # Gemini
+    adapter: gemini_native
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    key_env: GEMINI_API_KEY
+    docs: https://ai.google.dev/api/generate-content
+    alt_transports:
+      openai_compat:
+        base_url: https://generativelanguage.googleapis.com/v1beta/openai/
+        docs: https://ai.google.dev/gemini-api/docs/openai
+    batch: gemini_batch                    # enable only after probe confirms
+    serving: first_party
+  deepseek:
+    adapter: openai_compatible
+    base_url: https://api.deepseek.com
+    key_env: DEEPSEEK_API_KEY
+    docs: https://api-docs.deepseek.com/
+    batch: none
+    serving: first_party
+  qwen:                                    # Alibaba Cloud Model Studio (DashScope)
+    adapter: openai_compatible
+    base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1   # Singapore (default)
+    regions:
+      us-virginia: https://dashscope-us.aliyuncs.com/compatible-mode/v1
+      cn-hongkong: https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1
+      cn-beijing:  https://dashscope.aliyuncs.com/compatible-mode/v1
+    key_env: DASHSCOPE_API_KEY
+    docs: https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope
+    batch: openai_batch_compatible
+    serving: first_party
+  moonshot:                                # Kimi
+    adapter: openai_compatible
+    base_url: https://api.moonshot.ai/v1   # international (default)
+    regions:
+      cn: https://api.moonshot.cn/v1
+    key_env: MOONSHOT_API_KEY
+    docs: https://platform.kimi.ai/docs/api/overview
+    batch: none
+    serving: first_party
+  openrouter:
+    adapter: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    key_env: OPENROUTER_API_KEY
+    docs: https://openrouter.ai/docs
+    batch: none
+    serving: aggregator                    # upstream provider and quantisation pinned per model
+  local:
+    adapter: openai_compatible
+    base_url: http://localhost:8000/v1     # vLLM / SGLang serving open weights
+    key_env: null
+    serving: self_hosted                   # weights hash and engine version recorded
+```
+
+- API keys are read only from the environment or `.env`. They are never written to the manifest, the DB, artefacts or reports.
+- Model IDs are never hard-coded in harness code. `financial-harness models list --provider P` lists them from the provider's models endpoint, and the manifest pins the exact ID.
+
+### 20.3 Expected provider behaviour
+
+This table records provider behaviour as documented and known on 2026-10-06. The adapter MUST NOT rely on it at run time: run-time capabilities come only from the frozen probe result (§20.4).
+
+| Provider | Thinking control (manifest `thinking` → native) | Reasoning trace returned | Structured output | Known traps |
+|---|---|---|---|---|
+| OpenAI | `effort` → `reasoning_effort` | None via Chat Completions | `response_format` JSON schema (strict) | Some reasoning models reject `temperature` |
+| Anthropic | `budget_tokens` → `thinking: {type: enabled, budget_tokens}` | Thinking blocks (full or summarised, by model) | `prompt_only` | Sampling-parameter constraints when thinking is on: probe |
+| Gemini, native | `effort` / `budget_tokens` → `thinkingConfig` | Thought summaries only when `includeThoughts` is set (`trace_visibility: summary`) | `responseMimeType: application/json` + `responseSchema` | Some models cannot switch thinking off |
+| Gemini, compatibility mode | `effort` → `reasoning_effort` (mapped to thinking budgets) | Probe | `response_format` | Separate stratum |
+| DeepSeek | Model choice (e.g. `deepseek-chat` = off, `deepseek-reasoner` = on) | `reasoning_content`, full | `response_format: json_object` | The reasoner is documented as silently ignoring `temperature` / `top_p`, so they record as `effective: false` |
+| Qwen | `on`/`off` → `enable_thinking` (extra body); budget → `thinking_budget` | `reasoning_content`, full | `response_format: json_object` (availability in thinking mode: probe) | Some thinking modes need streaming; the adapter accumulates the stream and records `stream: true` |
+| Kimi | Model variant (e.g. `*-thinking`) | `reasoning_content` | `response_format: json_object` | Native temperature range differs from OpenAI's: probe |
+| OpenRouter | `reasoning` passthrough | Depends on the upstream | Depends on the upstream | Upstream must be pinned |
+| Local | Engine-specific | Engine-specific | Engine guided decoding | Record weights hash and engine version |
+
+Normalised manifest field:
+
+```yaml
+thinking: {mode: off | on | provider_default, effort: low | medium | high | null, budget_tokens: <int> | null}
+```
+
+- If a provider cannot express the requested setting, the probe records `thinking_effective`, and the model key carries the actual behaviour.
+- `temperature` is passed on the provider's native scale. Scales and samplers differ, so equal nominal temperatures do not mean equal stochasticity across providers. Cross-model claims therefore rest on within-model paired θ, with each model's own null arm A0 calibrating its noise. Raw response variability is never compared across providers.
+
+### 20.4 Probe (`financial-harness probe MODEL_KEY [--region R]`)
+
+The probe makes at most 12 calls with fixed, neutral prompts, and reports its own cost. It checks:
+1. **Listing:** the model ID is returned by the provider's models endpoint. Record the context and output limits if exposed.
+2. **System role:** accepted, or must be inlined.
+3. **Determinism at T = 0:** three identical calls give identical text (`deterministic_at_t0`).
+4. **Seed:** two calls at T = 0.7 with the same seed are identical, and a call with a different seed differs (`seed_effective`).
+5. **Structured output:** a schema request is accepted and the output validates (`schema_enforced`).
+6. **Thinking:** the requested setting is honoured; record whether a trace is returned and its visibility (`none | summary | full`).
+7. **Parameter echo:** compare request against response metadata and list silently ignored parameters.
+8. **Streaming:** whether the chosen thinking mode requires streaming.
+
+- Output goes to `probes/<model_key>/<YYYY-MM-DD>.json`.
+- `validate` requires a probe at most 30 days old for every panel model. The probe result is copied into the manifest (`probe_ref` plus capabilities), so capabilities are frozen with the experiment.
+- If a run-time response contradicts a frozen capability (a trace appears or disappears, a schema is rejected), the runner logs a `capability_drift` event. That model's results become INCOMPLETE.
+
+### 20.5 Data policy (`provider_policy.yaml`, user-owned) **[D-7]**
+
+```yaml
+allow:
+  synthetic:    [openai, anthropic, google, deepseek, qwen, moonshot, openrouter, local]
+  licensed:     [local]          # extend explicitly, per licence terms
+  confidential: [local]
+deny_regions: []                 # e.g. [qwen:cn-beijing, moonshot:cn]
+```
+
+- By default, only synthetic data goes to external providers.
+- The provider region is recorded on every trial.
+- The runner enforces rule §2.14 before submitting the first block.
+
+### 20.6 Model keys
+
+Format: `<provider>--<model>[--<region>][--think-<setting>]`. Lowercase, characters `[a-z0-9.-]`, with `/` replaced by `_`.
+
+Examples: `deepseek--deepseek-reasoner`, `qwen--<model>--sg--think-on`, `moonshot--<model>`, `google--<model>--think-low`.
+
+The same open weights served first-party, through an OpenRouter upstream, or locally are **different model keys**, because quantisation, samplers and hidden system prompts differ. They are never pooled.
+
+### 20.7 Interface
 
 ```python
 @dataclass(frozen=True)
 class ModelCapabilities:
     provider: str
     model: str
+    region: str | None
+    transport: str                    # native | openai_compat
+    serving: str                      # first_party | aggregator | self_hosted
     revision: str | None
     context_tokens: int
     max_output_tokens: int
-    supports_seed: bool
-    supports_temperature: bool
-    supports_top_p: bool
+    temperature_range: tuple[float, float] | None
+    supports_seed: bool               # from probe: seed_effective
     supports_system: bool
     supports_schema: bool
-    returns_reasoning_trace: bool
-    upstream_routing: str | None   # e.g. OpenRouter upstream provider + quantisation
+    thinking_effective: str           # off | on | summary_only | not_controllable
+    trace_visibility: str             # none | summary | full
+    stream_required: bool
+    upstream_routing: str | None      # OpenRouter upstream + quantisation
 
 class ModelAdapter(Protocol):
     def capabilities(self) -> ModelCapabilities: ...
     async def run(self, request: ModelRequest) -> ModelResponse: ...
 ```
 
-`ModelResponse` fields: `text`, `reasoning_trace`, `finish_reason`, `usage {input, output, reasoning}`, `effective_params`, `provider_request_id`, `raw_payload` (stored as an artefact), `latency_ms`, `status`.
+`ModelResponse` fields: `text`, `reasoning_trace` (from `reasoning_content`, thinking blocks or thought parts, whichever the provider returns), `finish_reason` (normalised: `stop | length | content_filter | refusal | tool | other` plus the raw value), `usage {input, output, reasoning}`, `effective_params`, `provider_request_id`, `raw_payload` (stored as an artefact), `latency_ms`, `status`.
 
-Rules:
+### 20.8 Rules
+
 - Store both requested and effective parameters. Unsupported parameters are recorded, never simulated.
 - Pin and record the OpenRouter upstream provider and quantisation.
-- If a reasoning model rejects temperature, record it; the model joins a temperature-policy stratum.
+- If a model rejects or ignores temperature, record it; the model joins a temperature-policy stratum.
 - Pre-check context with the provider tokeniser where available, otherwise a chars/3 upper bound. Cases that do not fit are EXCLUDED_CONTEXT for that model. Cross-model contrasts use the intersection of included clusters.
-- V1 adapters: Fake (deterministic, configurable effect), OpenAI, Anthropic, OpenRouter. Sign-off needs at least two real adapters **[D-2]**.
+- Cross-model attribution comparisons use the contract channel (`reasoning` or `rationale`, §14) only. The `trace` channel exists for some providers and not others.
+- V1 adapters: `fake`, `openai_compatible` (exercised against OpenAI, DeepSeek, Qwen, Kimi, Gemini compatibility mode and OpenRouter), `anthropic`, `gemini_native`. Sign-off needs at least two real providers **[D-2]**.
 
 ---
 
@@ -502,8 +666,8 @@ Rules:
 
 Every Trial stores:
 - **Identity:** trial_id, experiment_id, testcase_id, variant_id, block_id, cluster_id.
-- **Model:** provider, model, model_revision if exposed, upstream_routing.
-- **Parameters:** requested and effective; seed requested and effective; temperature requested and effective.
+- **Model:** model_key, provider, model, model_revision if exposed, region, transport, serving, upstream_routing, probe_ref.
+- **Parameters:** requested and effective; seed requested and effective; temperature requested and effective; thinking requested and effective; stream flag.
 - **Prompt:** messages artefact hash, prompt_hash, context_hash.
 - **Versions:** manifest_hash, generator, template, contract, evaluator, oracle, harness git SHA, sandbox image digest.
 - **Execution:** timestamps, submission_seq, batch_id, attempt count, latency.
@@ -688,7 +852,7 @@ REFUSAL is assigned only from a provider refusal stop reason or field, or a cont
 
 ## 29. Persistence
 
-Each run has its own SQLite database, `runs/<run_id>/run.sqlite`, in WAL mode. The runner is the single writer.
+Each run has its own SQLite database, `<run_dir>/db/run.sqlite`, in WAL mode (directory layout in §32A.1). The runner is the single writer.
 
 ```
 manifest(manifest_hash PK, experiment_id, schema_version, manifest_artifact, frozen_at)
@@ -703,7 +867,7 @@ analysis(analysis_id PK, manifest_hash, model_key, feature_id, results_json, lab
 event(seq INTEGER PK AUTOINCREMENT, ts, kind, payload_json)
 ```
 
-- **Artefacts** are content-addressed at `runs/<run_id>/artifacts/sha256/<2>/<62>`. Write tmp → fsync → rename, and insert the DB row only after the artefact exists.
+- **Artefacts** are content-addressed at `<run_dir>/artifacts/sha256/<2>/<62>`. Write tmp → fsync → rename, and insert the DB row only after the artefact exists.
 - **Trial status** only moves forward: PENDING → SUBMITTED → terminal. Commit every 100 terminal trials or every 5 s, whichever comes first.
 - **Resume:**
   - Select non-terminal trials.
@@ -711,10 +875,7 @@ event(seq INTEGER PK AUTOINCREMENT, ts, kind, payload_json)
   - Then resubmit only the failed items.
   - Duplicate provider results are all stored; the first by `attempt_no` is used.
 
-```
-runs/<run_id>/ manifest.yaml manifest.lock cases.jsonl run.sqlite artifacts/
-               corpus_report.json report.json report.md
-```
+The run directory layout and every output file are specified in §32A.
 
 ---
 
@@ -738,7 +899,7 @@ runs/<run_id>/ manifest.yaml manifest.lock cases.jsonl run.sqlite artifacts/
 
 | Command | Contract |
 |---|---|
-| `replay RUN_ID --reevaluate` | Re-parse stored responses and re-run deterministic evaluators and the analysis. `report.json` MUST be byte-identical, with timestamps kept in a separate excluded field. Semantic evaluators reuse stored outputs unless `--re-judge` is given. |
+| `replay RUN_ID --reevaluate` | Re-parse stored responses and re-run deterministic evaluators and the analysis. Every file under `results/`, `report/` and `models/`, plus `README.md`, MUST be byte-identical (§32A.8). Semantic evaluators reuse stored outputs unless `--re-judge` is given. |
 | `replay RUN_ID --reexecute` | A new run from the same manifest and effective params. It is reported as a replication: θ difference with CI, and label agreement. |
 | `generate` regeneration | The same spec, seeds and generator version reproduce `manifest_hash`. |
 
@@ -756,11 +917,245 @@ financial-harness run      SPEC.yaml ...               # = generate → validate
 financial-harness status   RUN_ID
 financial-harness evaluate RUN_ID
 financial-harness analyse  RUN_ID
-financial-harness report   RUN_ID
+financial-harness render   RUN_ID                      # regenerate every output file from the DB (§32A); alias: report
 financial-harness replay   RUN_ID --reevaluate | --reexecute
+financial-harness compare  RUN_ID [RUN_ID ...] --name NAME   # cross-run label matrix (§32A.7)
+financial-harness models   list --provider P [--region R]     # model IDs from the provider's models endpoint
+financial-harness probe    MODEL_KEY [--region R]             # capability probe (§20.4)
 ```
 
-Exit codes: 0 OK · 1 error · 2 validation failure · 3 budget stop · 4 incomplete run.
+Exit codes: 0 OK · 1 error · 2 validation failure · 3 budget stop · 4 incomplete run · 5 policy refusal (§2.14) · 6 stale or missing probe.
+
+---
+
+## 32A. Output files and reports
+
+The output is designed so that a reader opens `README.md`, sees the answer in one table, and can trace every number to one CSV row.
+
+### 32A.1 Directory layout
+
+```
+runs/
+├── INDEX.md                                      # every run, newest first
+├── index.json
+└── 2026-10-06_momentum-stock-add-v1_3f9c2a1b/     # <UTC start date>_<experiment_key slug>_<run_id[:8]>
+    ├── README.md                                 # entry point: status, headline, file map, how to reproduce
+    ├── manifest/
+    │   ├── manifest.yaml
+    │   ├── manifest.lock
+    │   ├── cases.jsonl
+    │   ├── corpus_report.json
+    │   └── probes/<model_key>.json
+    ├── results/                                  # machine-readable; the source of every reported number
+    │   ├── summary.json
+    │   ├── effects.csv
+    │   ├── labels.csv
+    │   ├── controls.csv
+    │   ├── missingness.csv
+    │   ├── attribution.csv
+    │   ├── clusters.csv
+    │   ├── trials.csv
+    │   ├── costs.csv
+    │   └── DATA_DICTIONARY.md
+    ├── report/
+    │   ├── report.md
+    │   ├── report.html                           # one self-contained file
+    │   └── figures/
+    │       ├── 01_primary_effect.svg
+    │       ├── 02_arm_rates.svg
+    │       ├── 03_controls.svg
+    │       ├── 04_missingness.svg
+    │       ├── 05_attribution.svg
+    │       └── 06_cost.svg
+    ├── models/<model_key>/
+    │   ├── responses.jsonl
+    │   └── examples.md
+    ├── db/run.sqlite
+    ├── artifacts/sha256/<2>/<62>
+    └── logs/
+        ├── events.jsonl
+        └── build_info.json                       # render timestamps, host, versions; excluded from byte-identity
+
+comparisons/<YYYY-MM-DD>_<name>/
+    matrix.csv  matrix.svg  comparison.md  comparison.html
+```
+
+Naming rules:
+- Lowercase only. File names are `snake_case`; directory slugs are kebab-case.
+- Dates are ISO 8601. Figures are numbered `NN_name.svg`.
+- No spaces, and at most 80 characters per path component.
+- Model keys follow §20.6.
+
+### 32A.2 Format rules
+
+| Format | Rules |
+|---|---|
+| JSON | UTF-8, LF, 2-space indent, trailing newline. Keys in schema order (not alphabetical), with `schema_version` first. Floats via `repr`; missing values are `null`; timestamps are ISO 8601 UTC with `Z`; enums are exactly as named in this spec. |
+| JSONL | As JSON, with one object per line and no indent. |
+| CSV | RFC 4180, UTF-8 without BOM, LF, comma separator, one `snake_case` header row. Units as suffixes (`_usd`, `_ms`, `_tokens`). Proportions as decimals in [0, 1]. Missing = empty field. Booleans `true` / `false`. Floats via `repr`. Rows in the documented sort order. The first column is `row_id` (UUIDv5 of the row's natural key). |
+| Markdown | CommonMark + GFM tables. One H1 and numbered H2 sections in fixed order. No raw HTML; relative links only. |
+| SVG | §32A.6 |
+| HTML | §32A.5 |
+
+Machine files never contain presentation rounding. Presentation files never introduce a number that is absent from `results/`; a test enforces this (§32A.8).
+
+### 32A.3 Results files
+
+| File | One row per | Sort | Columns, in order |
+|---|---|---|---|
+| `effects.csv` | model × feature × contrast | panel order, feature, contrast | row_id, experiment_key, model_key, feature_id, analysis_role (`primary`/`secondary`/`exploratory`), contrast, effect_scale, n_clusters, n_cases, n_trials_a, n_trials_b, mean_a, mean_b, theta, ci_low, ci_high, ci2a_low, ci2a_high, alpha_adj, p_raw, p_adj, p_tost, delta, zone, correction_family |
+| `labels.csv` | model × feature | panel order, feature | row_id, experiment_key, model_key, feature_id, mandate_id, oracle_type, oracle_direction, oracle_confidence, zone, sensitivity_label, attribution_label, attribution_channel, composite_label, gates_failed (`;`-separated), reasons |
+| `controls.csv` | model × control | panel order, control | row_id, model_key, control (`null`/`placebo`/`positive`), n_clusters, theta, ci_low, ci_high, expected, observed_label, passed |
+| `missingness.csv` | model × arm × status | panel order, arm, status | row_id, model_key, arm, status, status_class (`valid`/`invalid`/`missing`/`excluded`), n, rate |
+| `attribution.csv` | model × channel | panel order, channel | row_id, model_key, channel, n_responsive, pi_r, ci_low, ci_high, pi_0, f0_times_n, eligible, label, baseline_mention_rate, habitually_mentioned |
+| `clusters.csv` | model × cluster × arm | panel order, cluster_id, arm | row_id, model_key, cluster_id, n_cases, arm, n_valid, n_invalid, n_missing, mean_y |
+| `trials.csv` | trial | model, case_idx, arm, paraphrase, repetition | row_id (= trial_id), model_key, case_idx, cluster_id, arm, paraphrase_idx, repetition, seed, seed_effective, status, finish_reason, primary_value, input_tokens, output_tokens, reasoning_tokens, latency_ms, cost_usd, prompt_hash, response_sha256 |
+| `costs.csv` | model | panel order | row_id, model_key, provider, region, calls, input_tokens, output_tokens, reasoning_tokens, cost_usd, probe_cost_usd, pricing_table_version |
+
+Contrast enum: `B_vs_A`, `A0_vs_A`, `PL_vs_A`, `PC_vs_A`, `invalid_rate_B_vs_A`, `B_vs_A_bound_worst`, `B_vs_A_bound_best`.
+
+`summary.json` is the one-file machine answer:
+
+```json
+{
+  "schema_version": "1.0",
+  "run": {"run_id": "…", "experiment_key": "momentum_stock_add.v1", "experiment_id": "…", "manifest_hash": "…",
+          "mode": "confirmatory", "status": "COMPLETE", "started_at": "…Z", "completed_at": "…Z", "harness_git_sha": "…"},
+  "design": {"concept": "momentum_12m", "mandate_id": "M1", "intervention": "+25% (A) → −25% (B) via price_12m_ago",
+             "primary_feature": "decision_add", "effect_scale": "risk_difference", "delta": 0.1, "alpha": 0.05,
+             "n_clusters_planned": 240, "P": 3, "R": 1},
+  "models": [
+    {"model_key": "deepseek--deepseek-chat", "provider": "deepseek", "region": null, "serving": "first_party",
+     "primary": {"theta": -0.32, "ci": [-0.38, -0.26], "ci2a": [-0.37, -0.27], "p_adj": 0.0001, "zone": "Z-",
+                 "sensitivity_label": "JUSTIFIED_SENSITIVITY", "attribution_label": "VERBALISED",
+                 "composite_label": null, "gates_failed": []},
+     "controls": {"null": "PASSED", "placebo": "PASSED", "positive": "PASSED"},
+     "missingness": {"invalid_rate_a": 0.021, "invalid_rate_b": 0.025, "bounds_change_zone": false},
+     "cost": {"calls": 2160, "cost_usd": 3.41},
+     "rows": {"effect": "<row_id>", "label": "<row_id>"}}
+  ],
+  "files": {"effects": "results/effects.csv", "labels": "results/labels.csv", "report_html": "report/report.html"}
+}
+```
+
+`DATA_DICTIONARY.md` is generated from `reporting/schemas/*.json`. For every file and column it gives the name, type, unit, definition and spec section.
+
+### 32A.4 `report/report.md` layout (fixed)
+
+```
+# <Experiment title>: <concept> under mandate <mandate_id>
+Run `3f9c2a1b` · 2026-10-06 · confirmatory · COMPLETE · manifest `a1b2c3d4` · harness `abc1234`
+
+## 1. Headline            Model | θ̂ [95% CI] | Zone | Sensitivity | Attribution | Gates failed
+## 2. Design              key/value table: question, mandate, intervention, closure, primary feature, estimand, δ, α, N planned/achieved, P, R, panel
+## 3. Primary effect      figure 01, then one block per model (format of the §37 example)
+## 4. Arm-level rates     figure 02 + table
+## 5. Controls            figure 03 + table: expected vs observed for null, placebo, positive
+## 6. Missingness         figure 04 + table by status; whether the bounds change the zone
+## 7. Attribution         figure 05 + table; channel stated
+## 8. Secondary and exploratory   every row tagged `secondary` or `exploratory`
+## 9. Diagnostics         corpus report, evaluator calibration, probes, capability drift, cost (figure 06)
+## 10. Provenance         hashes, versions, seeds, file map
+```
+
+Number formats (presentation only):
+
+| Quantity | Format | Example |
+|---|---|---|
+| θ, proportions | 2 dp, signed, U+2212 minus | −0.32 |
+| Confidence interval | `[low, high]`, same dp | [−0.38, −0.26] |
+| p-value | `<0.001`, otherwise 2 significant figures | 0.034 |
+| Rates in prose | %, 1 dp | 2.5% |
+| Cost | USD, 2 dp, thousands separator | $1,284.50 |
+| Tokens | compact | 12.9K, 4.2M |
+| Dates | ISO 8601 | 2026-10-06 |
+
+Labels appear as code spans preceded by a glyph, so meaning never depends on colour:
+
+| Class | Labels | Glyph | Status colour |
+|---|---|---|---|
+| good | JUSTIFIED_SENSITIVITY, INVARIANT_AS_REQUIRED, CALIBRATED_SENSITIVITY, MEETS_STANDARD, VERBALISED | ✓ | good |
+| warning | UNDER_SENSITIVITY, SUB_THRESHOLD_SENSITIVITY, SUB_THRESHOLD | ▲ | warning |
+| serious | OVER_SENSITIVITY, UNVERBALISED_DEPENDENCY, PLACEBO_FAILED, INSTRUMENT_INSENSITIVE, UNSTABLE, `*_MISSINGNESS_SENSITIVE` | ◆ | serious |
+| critical | SPURIOUS_SENSITIVITY, PERVERSE_SENSITIVITY, BELOW_STANDARD, UNVERBALISED_BIAS | ✕ | critical |
+| neutral | INDETERMINATE, SENSITIVE, INSENSITIVE | ○ | none (muted ink) |
+
+Prose is UK English. The word "bias" appears only inside a label that §24 assigned.
+
+### 32A.5 `report/report.html`
+
+- **Self-contained:** one file with inline CSS and inline SVG. It makes no external requests (no CDN, web fonts or analytics), so it opens offline and can be attached to confidential reviews.
+- **Structure:** same section order as `report.md`, with a sticky table of contents and `<details>` for long tables. Every figure is followed by `<details><summary>Data</summary>` containing the exact CSV rows behind it.
+- **Theming:** colours are CSS custom properties on `:root`, with light values by default and dark overrides under `@media (prefers-color-scheme: dark)` (palette in §32A.6). `body` sets an explicit background.
+- **Typography:** `system-ui, -apple-system, "Segoe UI", sans-serif`. Tables use `font-variant-numeric: tabular-nums`.
+- **Layout:** maximum content width 1,100 px, usable down to 375 px. Wide tables scroll inside their own container, never the page.
+- **Interaction:** every SVG mark has a `<title>`, giving native hover tooltips without JavaScript. No content requires JavaScript; an optional inline script of at most 5 KB may add table sorting.
+- **Print:** A4 stylesheet, figures never split across pages, `<details>` expanded.
+- **Size:** at most 5 MB. Examples are linked, not inlined.
+
+### 32A.6 Figures (`reporting/svg.py`)
+
+Construction rules:
+- **Generation:** hand-written SVG from a small set of primitives (axis, hairline grid, point, interval, bar, text). No plotting library. Deterministic: fixed element order, coordinates rounded to 0.01, no random IDs, no timestamps.
+- **Axes:** one x-axis per panel; never a dual axis.
+- **Grid and text:** 1 px solid hairline gridlines; axis text in muted ink; all text in ink tokens, never in series or status colours.
+- **Marks:** lines and intervals 2 px; markers ≥ 8 px with a 2 px surface-colour ring; bars ≤ 24 px thick, with a 4 px rounded data end and a square baseline end; 2 px surface gap between stacked segments.
+- **Identity:** each model is identified by its row label, so colour is never needed for model identity. Colour encodes only arm (two series) or status class.
+- **Legends:** present whenever there are two or more series; none for a single series.
+- **Tooltips:** every mark has a `<title>` holding its exact values and `row_id`.
+- **Size and theming:** `viewBox` width 960; height = 40 px per row + 80 px of chrome. An embedded `<style>` carries the light and dark tokens, so standalone SVG files also follow the viewer's theme.
+
+Palette. These are reference values already validated for colour-vision-deficiency separation and contrast; changing any of them requires re-validation:
+
+| Role | Light | Dark |
+|---|---|---|
+| Surface | `#fcfcfb` | `#1a1a19` |
+| Primary ink | `#0b0b0b` | `#ffffff` |
+| Secondary ink | `#52514e` | `#c3c2b7` |
+| Muted ink (axes) | `#898781` | `#898781` |
+| Gridline | `#e1e0d9` | `#2c2c2a` |
+| Baseline | `#c3c2b7` | `#383835` |
+| Equivalence band (±δ) | `#f0efec` | `#383835` |
+| Arm A (series 1) | `#2a78d6` | `#3987e5` |
+| Arm B (series 2) | `#eb6834` | `#d95926` |
+| Status good / warning / serious / critical | `#0ca30c` / `#fab219` / `#ec835a` / `#d03b3b` | same |
+| Missingness categories 1–6 | `#2a78d6` `#eb6834` `#1baf7a` `#eda100` `#e87ba4` `#008300` | `#3987e5` `#d95926` `#199e70` `#c98500` `#d55181` `#008300` |
+
+Three light-mode categories fall below 3:1 contrast against the surface; the mandatory data table under each figure is the mitigation.
+
+| File | Form | Encoding |
+|---|---|---|
+| `01_primary_effect.svg` | Forest plot, one row per model in manifest panel order (stable across runs) | x = θ in effect units; shaded band [−δ, δ]; hairline at 0; 2 px line = CI_{1−α}; 6 px segment = CI_{1−2α}; marker = θ̂, filled with its sensitivity label's status colour; right-hand text in ink, e.g. "−0.32 [−0.38, −0.26] ✓ JUSTIFIED_SENSITIVITY" |
+| `02_arm_rates.svg` | Dumbbell, one row per model | x = arm mean on [0, 1]; dot A (series 1), dot B (series 2); 2 px connector in muted ink; legend names both arms |
+| `03_controls.svg` | Three small multiples (null, placebo, positive) with shared rows | Forest encoding per panel; expected region shaded; each panel labels its own x-scale |
+| `04_missingness.svg` | Horizontal stacked bars, two per model (A, B) | Segments = invalid-status categories; vertical hairline at `max_invalid_rate`; x = rate |
+| `05_attribution.svg` | Interval plot, one row per model | π_R with CI (filled marker); π_0 (hollow marker); vertical line at τ_v |
+| `06_cost.svg` | Horizontal bars, single series, no legend | cost_usd with the value at the bar tip; token counts in `<title>` |
+| `comparisons/…/matrix.svg` | Label matrix: rows = models, columns = experiments | Cell text = glyph + label; cell wash = status colour at 15% opacity; text in ink |
+
+The forest plot is the canonical view; every other figure is supporting.
+
+### 32A.7 Per-model, run-root and index files
+
+- **`models/<model_key>/responses.jsonl`:** one line per trial, ordered by (case_idx, arm, paraphrase_idx, repetition). Fields: trial_id, case_idx, cluster_id, arm, paraphrase_idx, repetition, status, finish_reason, decision fields, confidence, material_factors, reasoning_excerpt (≤ 600 chars), trace_excerpt (≤ 300 chars, if any), tokens, latency_ms, cost_usd, and artefact hashes for the full prompt, response and trace.
+- **`models/<model_key>/examples.md`:** a seeded selection of up to 10 responsive pairs, 5 contradictory-reasoning cases and 5 parse failures. Each example shows:
+  - case and cluster IDs;
+  - a two-column A | B table containing only the fields in the diff;
+  - decision and confidence per arm;
+  - reasoning excerpts, with concept mentions in **bold** (deterministic lexicon);
+  - artefact hashes for the full text.
+
+  Full prompts are never inlined.
+- **`README.md` (run root):** title, status line, the headline table (identical to report §1), a file map (path → one-line description, from a fixed table), and the reproduce commands (`render`, `replay --reevaluate`).
+- **`runs/INDEX.md` and `runs/index.json`:** one row per run, newest first: date, link, experiment, mode, models, status, and headline label per model.
+- **`comparisons/<date>_<name>/`:** `matrix.csv` (one row per model × experiment, with row_ids pointing into each run's `labels.csv`), `matrix.svg`, and `comparison.md` / `comparison.html` in the same style. Runs are compared only if they share δ, the effect scale and the oracle for each experiment; otherwise `compare` exits 2.
+
+### 32A.8 Determinism and checks
+
+- `financial-harness render RUN_ID` regenerates `README.md`, `results/`, `report/` and `models/` from `db/run.sqlite` and artefacts only. Output is byte-identical across renders and after `replay --reevaluate`. Timestamps and host details go only to `logs/build_info.json`.
+- `summary.json` and every CSV validate against `reporting/schemas/*.json` (JSON Schema 2020-12) in tests.
+- A test parses `report.md` and `report.html` and asserts that every number appears in a `results/` file at the stated precision.
+- Golden snapshot: the `report/` directory from the S1 fake-adapter run is committed under `tests/harness/golden/` and compared byte for byte.
 
 ---
 
@@ -773,13 +1168,15 @@ financial_llm_harness/
     generation/    scenario.py intervention.py render.py paraphrase.py validate_case.py validate_corpus.py
     families/      stock_add/ transcript_summary/ covariance_choice/ temporal_norm_design/ temporal_norm_code/
                    (each: family.yaml, family.py, templates/, fixtures/)
-    models/        base.py fake.py openai.py anthropic.py openrouter.py
+    models/        base.py fake.py openai_compatible.py anthropic.py gemini_native.py probe.py providers.yaml
+    provider_policy.yaml   pricing.yaml
     evaluation/    parse.py rules.py code_static.py sandbox.py semantic.py calibration.py
     oracles.py
     statistics/    paired.py equivalence.py power.py correction.py sequential.py
     execution/     runner.py budget.py retries.py
     storage/       db.py artifacts.py
-    reporting/     report_json.py report_md.py
+    reporting/     tables.py summary.py markdown.py html.py svg.py examples.py index.py style.css
+                   schemas/ (summary.v1.json, effects.v1.json, labels.v1.json, …)
 experiments/financial/*.yaml
 tests/harness/...
 ```
@@ -878,11 +1275,20 @@ Each slice ships:
 - **Golden:** canonical fixture + recorded responses → fixed observations, θ and label.
 - **Adapters:**
   - FakeAdapter.
-  - Recorded-cassette tests for OpenAI, Anthropic and OpenRouter, with no network in CI.
+  - Recorded-cassette tests for every registry provider (OpenAI, Anthropic, Gemini native and compatibility mode, DeepSeek, Qwen, Kimi, OpenRouter), with no network in CI. Each covers: plain response, structured output, reasoning trace extraction (`reasoning_content`, thinking blocks, thought parts), a silently ignored parameter, each `finish_reason`, and an HTTP 429 followed by success.
+  - One parametrised conformance suite runs against every adapter and asserts the same `ModelResponse` invariants.
+  - Probe logic, tested against cassettes: seed and determinism detection, capability-drift detection.
+  - Policy: a `licensed` manifest aimed at a disallowed provider exits 5 before any call.
   - `@pytest.mark.live` smoke tests, skipped without keys.
+- **Reporting:**
+  - Schema validation of `summary.json` and every CSV.
+  - Numbers-traceability test (§32A.8).
+  - Byte-identical `render` (run twice, then diff).
+  - Golden `report/` snapshot.
+  - Static checks: no external URLs in `report.html`, every SVG mark has a `<title>`, no colour hex outside the §32A.6 palette.
 - **Sandbox:** network blocked (socket connect fails), memory limit (a 1 GiB allocation fails), timeout, PID limit (fork bomb contained), read-only root, output truncation. Runs in CI.
 - **Resume:** fault-inject after k trials, then resume. There are no duplicate trial IDs, and the final DB equals an uninterrupted run (deterministic fake).
-- **Replay:** `--reevaluate` gives a byte-identical `report.json`.
+- **Replay:** `--reevaluate` gives byte-identical `results/`, `report/`, `models/` and `README.md`.
 - **Legacy:** the existing suite stays green; the LFS result-load test passes (§0.6).
 
 ---
@@ -908,10 +1314,10 @@ Each slice ships:
 16. Persist provenance.
 17. Resume after an injected interruption.
 18. Pass `replay --reevaluate` byte-identically.
-19. Emit `report.json` and `report.md`.
+19. Emit the full §32A tree: `README.md`, `results/*`, `report/report.md`, `report/report.html`, the six figures and `models/*`, all passing the §32A.8 checks.
 20. Recover the fake's configured θ within its CI.
 
-**Sign-off:** the same spec with two real adapters, within the budget cap **[D-2]**.
+**Sign-off:** the same spec run against the real-provider panel **[D-2]**, within the budget cap, followed by `compare` across the panel.
 
 Example report block (illustrative numbers):
 
@@ -936,9 +1342,9 @@ Attribution[reasoning_before]: π_R 0.61 [0.54, 0.68], |R| 98, f₀·N 9 → VER
 | Milestone | Deliverable | Done-test |
 |---|---|---|
 | M0 | pyproject changes, canonical JSON, IDs, SQLite schema, CLI skeleton | CI green; `financial-harness --help` |
-| M1 | S1 generator and validators, freeze, FakeAdapter, runner, paired statistics, report | `run … --adapter fake --yes` exits 0 with a report |
-| M2 | Controls, missing-data rules, §24 labels, power/plan, resume, replay | Calibration and resume tests pass |
-| M3 | OpenAI, Anthropic and OpenRouter adapters, cassettes, budget | Cassette tests pass; `plan` costs match pricing |
+| M1 | S1 generator and validators, freeze, FakeAdapter, runner, paired statistics, `results/` CSVs, `summary.json`, `report.md` | `run … --adapter fake --yes` exits 0; schema tests pass |
+| M2 | Controls, missing-data rules, §24 labels, power/plan, resume, replay; full §32A (HTML, SVG figures, examples, README, index, `render`) | Calibration, resume, byte-identical render and golden-report tests pass |
+| M3 | `openai_compatible` (OpenAI, DeepSeek, Qwen, Kimi, Gemini compatibility mode, OpenRouter, local), `anthropic`, `gemini_native`, `probe`, `models list`, provider policy, budget, `compare` | Cassette and conformance tests pass for all providers; `plan` costs match pricing |
 | M4 | S3, S4 | Golden tests pass |
 | M5 | Sandbox, S5 | Sandbox tests pass in CI |
 | M6 | S2, semantic calibration, attribution axis | κ report produced; S2 golden passes |
@@ -951,11 +1357,13 @@ Attribution[reasoning_before]: π_R 0.61 [0.54, 0.68], |R| 98, f₀·N 9 → VER
 | ID | Decision | Default | Blocks |
 |---|---|---|---|
 | D-1 | δ per slice | As in §35 | Nothing (default usable) |
-| D-2 | Real providers for sign-off; budget cap | OpenAI + Anthropic; no default cap | Live runs only |
+| D-2 | Sign-off panel (one model, region and thinking setting per provider) and budget cap | Anthropic, OpenAI, Gemini, DeepSeek, Qwen, Kimi, with thinking `provider_default`; no default cap | Live runs only |
 | D-3 | Who labels the calibration sets (≥ 200 items per semantic feature) | None | S2 confirmatory; attribution axis |
 | D-4 | Mandate texts M1/M2 | As in §35 | Nothing |
 | D-5 | Temperature policy; P, R | T = 0.7 (legacy), P = 3, R = 1 | Nothing |
 | D-6 | Docker unavailable on target machines | Docker required; fail closed | S5 outside CI |
+| D-7 | Provider data policy and regions (`provider_policy.yaml`), including whether China-region endpoints (Qwen `cn-beijing`, Kimi `cn`) are allowed | Synthetic data only to external providers; Qwen Singapore and Kimi international endpoints | Any non-synthetic run |
+| D-8 | Report branding (palette, logo) | §32A.6 reference palette; no logo | Nothing |
 
 ---
 
