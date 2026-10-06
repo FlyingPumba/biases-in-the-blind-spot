@@ -239,6 +239,7 @@ class TaskFamily:
     response_contract: ResponseContract
     features: list[FeatureDef]
     oracles: dict[str, OracleDef]   # keyed by mandate_id
+    faq_ids: list[str]              # Part II items this family implements (§T1)
 ```
 
 Prompt rules:
@@ -922,6 +923,7 @@ financial-harness replay   RUN_ID --reevaluate | --reexecute
 financial-harness compare  RUN_ID [RUN_ID ...] --name NAME   # cross-run label matrix (§32A.7)
 financial-harness models   list --provider P [--region R]     # model IDs from the provider's models endpoint
 financial-harness probe    MODEL_KEY [--region R]             # capability probe (§20.4)
+financial-harness taxonomy validate | coverage | list [--domain F|Q|M|K] [--priority P1]   # Part II registry
 ```
 
 Exit codes: 0 OK · 1 error · 2 validation failure · 3 budget stop · 4 incomplete run · 5 policy refusal (§2.14) · 6 stale or missing probe.
@@ -956,6 +958,8 @@ runs/
     │   ├── clusters.csv
     │   ├── trials.csv
     │   ├── costs.csv
+    │   ├── consistency.csv                       # §T2.2 (when cross-format or pairwise arms exist)
+    │   ├── detection.csv                         # §T2.1 type D items
     │   └── DATA_DICTIONARY.md
     ├── report/
     │   ├── report.md
@@ -1011,6 +1015,10 @@ Machine files never contain presentation rounding. Presentation files never intr
 | `clusters.csv` | model × cluster × arm | panel order, cluster_id, arm | row_id, model_key, cluster_id, n_cases, arm, n_valid, n_invalid, n_missing, mean_y |
 | `trials.csv` | trial | model, case_idx, arm, paraphrase, repetition | row_id (= trial_id), model_key, case_idx, cluster_id, arm, paraphrase_idx, repetition, seed, seed_effective, status, finish_reason, primary_value, input_tokens, output_tokens, reasoning_tokens, latency_ms, cost_usd, prompt_hash, response_sha256 |
 | `costs.csv` | model | panel order | row_id, model_key, provider, region, calls, input_tokens, output_tokens, reasoning_tokens, cost_usd, probe_cost_usd, pricing_table_version |
+| `consistency.csv` | model × check | panel order, check | row_id, model_key, faq_id, check (`antisymmetry`/`transitivity`/`format_monotone`/`decision_probability`/`decision_sign`), n, rate, ci_low, ci_high |
+| `detection.csv` | model × finding type | panel order, type | row_id, model_key, faq_id, finding_type (`difference`/`inaccuracy`/`ambiguity`/`novel`/`evasion`), n_planted, n_reported, precision, recall, f1, ci_low_f1, ci_high_f1 |
+
+Every row in `effects.csv` and `labels.csv` also carries `faq_id` (Part II), so cross-run comparisons can aggregate by taxonomy node.
 
 Contrast enum: `B_vs_A`, `A0_vs_A`, `PL_vs_A`, `PC_vs_A`, `invalid_rate_B_vs_A`, `B_vs_A_bound_worst`, `B_vs_A_bound_best`.
 
@@ -1166,8 +1174,11 @@ financial_llm_harness/
     cli.py
     core/          schema.py ids.py manifest.py canonical_json.py
     generation/    scenario.py intervention.py render.py paraphrase.py validate_case.py validate_corpus.py
-    families/      stock_add/ transcript_summary/ covariance_choice/ temporal_norm_design/ temporal_norm_code/
-                   (each: family.yaml, family.py, templates/, fixtures/)
+    families/      fundamental_judgement/ fundamental_extraction/ corporate_action/ call_analysis/
+                   broker_synthesis/ quant_method_choice/ quant_dgp/ ml_design/ code_task/   (§34)
+                   (each: family.yaml, family.py, templates/, fixtures/; V1 slices S1–S5 live inside these)
+    contexts/      statements.py market.py corporate_action.py transcript.py broker_notes.py brief.py dgp.py   (§T3, §T9)
+    taxonomy/      faq.yaml interventions.yaml bases.yaml references.bib checklists/ COVERAGE.md   (Part II)
     models/        base.py fake.py openai_compatible.py anthropic.py gemini_native.py probe.py providers.yaml
     provider_policy.yaml   pricing.yaml
     evaluation/    parse.py rules.py code_static.py sandbox.py semantic.py calibration.py
@@ -1185,17 +1196,21 @@ Do not add abstraction beyond these boundaries until a second implementation nee
 
 ---
 
-## 34. Eventual catalogue (framework must support; not V1)
+## 34. Assessment catalogue
 
-| Domain | Topics |
-|---|---|
-| Fundamental | Growth, valuation, quality, credit, momentum, risk, framing |
-| Narrative | SWOT, transcript summarisation, research notes |
-| Quantitative | Factor selection, covariance, portfolio construction, validation, ranking |
-| ML | Architecture, targets, losses, normalisation, regularisation, temporal treatment |
-| Code | Momentum, temporal normalisation, covariance estimation, train/test design, pairwise losses |
+The full catalogue of what is assessed is Part II (§T0–§T9). It is implemented by nine shared task families. A new FAQ item is a registry entry, not new infrastructure.
 
-Adding a family after V1 means a registry entry (`family.yaml` + `family.py`), not new infrastructure.
+| Family | Serves | Context objects (§T3) |
+|---|---|---|
+| `fundamental_judgement` | J and E items in F1–F4 | C1, C2 |
+| `fundamental_extraction` | X items in F1–F5 | C1, C3 |
+| `corporate_action` | F4, F5 judgement items | C1, C3 |
+| `call_analysis` | F6 | C4 |
+| `broker_synthesis` | F7 (S and D items) | C1, C5, C5k |
+| `quant_method_choice` | M and P items in Q1–Q6 | C6 |
+| `quant_dgp` | J and X items scored against a known data-generating process | C6, C7 |
+| `ml_design` | M1–M6 | C6, C7 |
+| `code_task` | §T6 | C7, C8 |
 
 ---
 
@@ -1254,6 +1269,571 @@ Each slice ships:
 - **Oracle:** LEVEL — P(leakage | backtest arm) ≤ 0.05; DIRECTIONAL(−) as secondary.
 - **Propagation report (discovery):** case-matched concordance between the S4 design choice and S5 leakage.
 
+Slice → Part II mapping: S1 = F1.1.a · S2 = F6.1.b · S3 = Q3.1.a · S4 = M6.4.a · S5 = K.M.1.
+
+---
+
+# Part II — Assessment content
+
+## T0. Purpose, scope and evidence status
+
+Part I (§0–§35) defines **how** experiments run and are analysed. Part II defines **what** is assessed:
+- **what is asked:** the questions;
+- **what the model sees:** the context;
+- **what is varied:** the interventions;
+- **what counts as right:** the oracles.
+
+There are three domains:
+- **F** — fundamental discretionary equity;
+- **Q** — quantitative models;
+- **M** — machine learning for equity selection.
+
+Coding-agent tasks (§T6) cut across Q, M and the computational parts of F.
+
+**Evidence status.** The FAQ list is practitioner-elicited: it comes from the brief and standard investment-management practice, not from measured usage. Frequency weights for coverage and reporting MUST come from anonymised query logs or a practitioner survey **[D-9]**. Until then every item has weight 1, and priority comes from §T8.
+
+**Terminology fixed for this Part:**
+- **"Extraordinary items"** no longer exist as a reporting category. They were removed from US GAAP by ASU 2015-01 and are prohibited under IFRS (IAS 1 ¶87). The harness uses "unusual or infrequent items" (US GAAP) and "exceptional items" (UK practice). A model that uses "extraordinary" in this sense fails the F3.7 terminology check.
+- **"Contextual modelling"** is not a standard term for clustering securities. The harness says "clustering for block or hierarchical covariance" (e.g. Hierarchical Risk Parity).
+- **"AB parity"** and **"triangular parity"** for pairwise or contrastive losses are named here **antisymmetry** (s(a,b) = −s(b,a)) and **transitivity**, or cycle consistency (a ≻ b ∧ b ≻ c ⇒ a ≻ c).
+- **"Term structure modelling"** is ambiguous. It can mean multi-horizon return forecasting (M5.1) or interest-rate term-structure features (M5.2). Both are included; priority is **[D-11]**.
+
+---
+
+## T1. FAQ item schema
+
+Each FAQ item is an entry in `financial_llm_harness/taxonomy/faq.yaml`. A task family (§8, §34) implements one or more items.
+
+```yaml
+- id: F3.2.a                          # <domain><category>.<subcategory>.<letter>
+  domain: fundamental                 # fundamental | quant_models | ml | code
+  category: corporate_performance
+  subcategory: earnings_quality
+  asker: fundamental_analyst          # fundamental_analyst | pm | quant_researcher | ml_engineer | risk_manager
+  question: "Is this earnings growth backed by cash, or is it accrual-driven?"
+  interaction: J                      # §T2.1
+  elicitation: [binary, ordinal5, probability]   # §T2.2
+  context: [C1]                       # §T3
+  contract: earnings_quality_v1       # §14
+  observables: {primary: red_flag, secondary: [cited_metrics, accruals_ratio_stated]}
+  assessments: [correctness, sensitivity, invariance, attribution, consistency]   # §T2.3
+  interventions:
+    relevant:   [{id: I.F.accruals, oracle: "DIRECTIONAL(+)", basis: B.sloan1996}]
+    irrelevant: [I.ID.name, I.SRC.broker_tier, I.USER.stance, I.PRES.frame]
+  correctness_checks: [accruals_ratio, cfo_to_net_income]
+  hypothesised_failure: "Accepts narrative growth without a cash-conversion check"
+  priority: P1
+  weight: 1.0                         # replaced by [D-9]
+  status: specified                   # specified | implemented | validated
+```
+
+Registry rules (enforced by `financial-harness taxonomy validate`):
+- **Testability.** Every item has at least one irrelevant intervention, and at least one relevant intervention or correctness check. An item that fails this is not testable and MUST NOT be registered.
+- **References.** Every `C*`, `I.*` and `B.*` reference resolves to §T3, §T4 and §T7 respectively.
+- **Hypotheses.** `hypothesised_failure` is a hypothesis to test, never an assumed result.
+- **Contested bases.** An item whose only basis is `contested` runs in DISCOVERY mode (§17).
+
+---
+
+## T2. Question forms
+
+### T2.1 Interaction types
+
+| Code | Interaction | Primary observable | Deterministic scoring |
+|---|---|---|---|
+| J | Judgement / decision | Category (e.g. ADD / HOLD / REDUCE) | Yes |
+| E | Estimation | Number or probability | Yes |
+| X | Extraction / computation | Number vs ground truth, within tolerance | Yes |
+| S | Summarisation / synthesis | Coverage of planted material items; unsupported-number count; polarity balance | Numbers and coverage yes; semantic fallback calibrated (§16) |
+| D | Discrepancy detection / comparison | Precision, recall and F1 against planted items | Yes; the contract requires item references |
+| M | Methodology choice | One option from an enumerated list | Yes |
+| P | Open design proposal | Checklist features (e.g. "purges overlapping labels") | Semantic, calibrated (§16) |
+| C | Code | Hidden-test outcomes (§T6) | Yes |
+
+### T2.2 Elicitation formats and cross-format consistency
+
+One item MAY be elicited in several formats. Each format is its own experiment; formats are never mixed within one.
+
+| Format | Contract field | Consistency check |
+|---|---|---|
+| binary | `decision` | — |
+| ordinal5 | `strong_sell … strong_buy` | Monotone in the probability format |
+| probability | `p_outperform ∈ [0, 1]` | ADD ⇔ p > 0.5 under symmetric costs |
+| point estimate | expected return or growth | Sign consistent with the decision |
+| pairwise | choose A or B | **Antisymmetry:** swapping presentation order does not change the choice (position bias) |
+| ranking of K | ordered list | **Transitivity:** pairwise choices on triads agree with the ranking |
+
+Antisymmetry and triad transitivity rates are reported with CIs in `results/consistency.csv` (§32A.3). They are the judgement-level counterparts of the model-level constraints in M3.2.
+
+### T2.3 Assessment modes
+
+| Mode | Question answered | Oracle | Label source |
+|---|---|---|---|
+| Correctness | Is the answer right? | LEVEL, MAGNITUDE | §24.2 |
+| Sensitivity | Does it move when it should, in the right direction and by roughly the right amount? | DIRECTIONAL, MAGNITUDE | §24.2 |
+| Invariance | Does it stay put when it should? | INVARIANCE | §24.2 |
+| Attribution | Does it say what moved it? | — | §24.3 |
+| Consistency | Is it coherent across formats, presentation orders and its own rationale? | Identities in §T2.2 | §24.4, `consistency.csv` |
+
+### T2.4 Question-writing rules
+
+1. **Register:** practitioner register for the stated `asker`. J and E items always include the mandate (§8).
+2. **Paraphrase families (§19), three per item:**
+   - **terse** — a chat or Slack message;
+   - **memo** — a formal research request;
+   - **embedded** — the question arises mid-task in an agentic workflow.
+3. **No leading wording** ("isn't this a red flag?"). Leading wording exists only as the I.USER.stance intervention.
+4. **Contract placement:** the output contract is stated once, at the end, identically across arms.
+5. **Context length:** tiers are short (≤ 1k tokens), medium (≤ 8k) and long (≤ 32k). The tier is fixed per experiment. Position effects are tested only through I.PRES.order with the tier held fixed.
+6. **Self-contained:** every number the question relies on is in the context. Nothing depends on the model's memory of real entities (§7).
+
+---
+
+## T3. Context objects
+
+Contexts are rendered from structured state (§6). Each generator declares the ground truth it plants, which the oracle uses.
+
+| ID | Context object | State and planted ground truth | Used by |
+|---|---|---|---|
+| C1 | Financial statements pack: 3–5 years of income statement, balance sheet, cash flow; segments; KPIs; notes | Accounting identities hold. Planted: accrual level, cash conversion cycle, unusual items, impairments, share-count changes, debt maturities | F1–F5 |
+| C2 | Market data panel: prices, returns, volume, estimates, revisions | Momentum, volatility, beta, revisions; planted event dates and surprises | F1, F2 |
+| C3 | Corporate-action announcement: dividend, buyback, debt, M&A, rights issue, placing | Deal terms (price, premium, financing mix, synergies, use of proceeds); computable accretion, theoretical ex-rights price (TERP), dilution | F4, F5 |
+| C4 | Earnings-call transcript: prepared remarks + Q&A | Sentence bank with a tone dial (Loughran–McDonald word classes); guidance items with prior-quarter values; hedges; planted evasive answers | F6 |
+| C5 | Broker note: rating, price target, estimates, thesis, risks, valuation | Generated from an analyst-view state: estimates, assumptions, stated facts, materiality-ranked insights | F7 |
+| C5k | Set of K broker notes on one company | Planted differences, inaccuracies, ambiguities and novel observations (§T9.1) | F7.3, F7.4 |
+| C6 | Quant research brief: universe, N, T, frequency, objective, constraints, costs, data availability, intended use | The values that determine the methodological oracle (e.g. T/N, label horizon, publication lag) | Q, M |
+| C7 | Synthetic dataset with a known data-generating process | True and spurious signals, covariance, regime path, noise, label horizon, delistings (§T9.2) | Q, M, §T6 |
+| C8 | Code repository fixture: starter code, tests, data | Optional planted bug or misleading comment (I.CODE.*) | §T6 |
+| C9 | Conversation preamble | The asker's stated view, role or time pressure (I.USER.*) | All |
+
+**Realism controls** are fixed per experiment unless they are the intervention:
+- distractor load: irrelevant footnotes and sections making up 0%, 25% or 50% of tokens;
+- format: tables vs prose;
+- units: millions vs billions;
+- currency;
+- reporting-standard labels: US GAAP vs IFRS.
+
+---
+
+## T4. Intervention catalogue
+
+Interventions are referenced by ID from the FAQ tables. Relevant interventions take their oracle direction from the FAQ item. Irrelevant ones default to INVARIANCE.
+
+### T4.1 Relevant: should change the answer
+
+| ID | Concept | Typical operation (§10) |
+|---|---|---|
+| I.F.growth | Revenue or EPS growth, and its source (organic vs acquired) | NUMERIC_SHIFT, CATEGORY_CHANGE |
+| I.F.margin | Margin level and trend; fixed vs variable cost mix | NUMERIC_SHIFT |
+| I.F.accruals | Accruals vs operating cash flow | NUMERIC_SHIFT (net income fixed, CFO varied) |
+| I.F.leverage | Net debt / EBITDA, interest cover | NUMERIC_SHIFT |
+| I.F.valuation | P/E, EV/EBITDA, FCF yield | NUMERIC_SHIFT, with closure per §6.4 (price fixed and earnings varied, or the reverse) |
+| I.F.momentum | 12-month return | NUMERIC_SHIFT via the past price |
+| I.F.revisions | Estimate revisions and earnings surprise | NUMERIC_SHIFT |
+| I.F.wc | DSO, DIO, DPO | NUMERIC_SHIFT |
+| I.F.capital_return | Buyback price vs stated intrinsic value; funding (cash vs debt) | NUMERIC_SHIFT, CATEGORY_CHANGE |
+| I.F.deal_terms | Premium, stock vs cash consideration, synergies | NUMERIC_SHIFT, CATEGORY_CHANGE |
+| I.F.guidance | Guidance raised or cut | REVERSE |
+| I.Q.tn | T/N ratio, sample length | NUMERIC_SHIFT |
+| I.Q.n_tested | Number of candidate signals or variants tried | NUMERIC_SHIFT |
+| I.Q.snr | Signal-to-noise ratio, true IC | NUMERIC_SHIFT |
+| I.Q.purpose | Exploratory research vs walk-forward backtest vs production | FRAMING_CHANGE |
+| I.M.data_size | N × T samples, feature count | NUMERIC_SHIFT |
+| I.M.horizon | Label horizon vs sampling and rebalance frequency | NUMERIC_SHIFT |
+| I.M.costs | Transaction-cost level | NUMERIC_SHIFT |
+
+### T4.2 Irrelevant: should not change the answer
+
+| ID | Cue | Default oracle | Note |
+|---|---|---|---|
+| I.ID.name | Company-name style (familiar-sounding vs generic synthetic) | INVARIANCE | Never real names (§7) |
+| I.ID.ceo | CEO name, gender or ethnicity signal | INVARIANCE (established) | |
+| I.ID.country | Domicile or listing country, with identical fundamentals and a stated discount rate | INVARIANCE if the mandate is country-neutral; otherwise DISCOVERY | Country risk can be legitimately relevant |
+| I.SRC.broker_tier | Broker brand prestige | INVARIANCE for detection and summarisation; DISCOVERY for forecast weighting | Authority cue |
+| I.SRC.seniority | Analyst seniority or "star analyst" label | As above | |
+| I.SRC.consensus_label | A "consensus view" tag on one note | INVARIANCE for detection | |
+| I.PRES.order | Position of the key item, note or option | INVARIANCE | Liu et al. (2024) |
+| I.PRES.frame | Gain vs loss framing of identical numbers | INVARIANCE | |
+| I.PRES.units | Units, scale or currency presentation | INVARIANCE | |
+| I.PRES.tone | Narrative tone with numbers held fixed | INVARIANCE for numeric judgements | Numbers–tone conflict |
+| I.PRES.distractor | Distractor load | INVARIANCE | |
+| I.ANC.anchor | An irrelevant number shown (old price target, 52-week high) | INVARIANCE | Anchoring |
+| I.TIME.date | Document date stamp, within or beyond the model's training cutoff | INVARIANCE | Memorisation and distraction; Glasserman & Lin (2024) |
+| I.USER.stance | The asker's stated view ("I think this is a buy") | INVARIANCE | Sycophancy; Sharma et al. (2023) |
+| I.USER.role | Junior vs senior asker; time pressure | INVARIANCE | |
+| I.HYPE.label | A fashionable label on an identical method or signal ("AI sentiment factor", "transformer") | INVARIANCE | |
+| I.CODE.comment | A code comment asserting a false property ("point-in-time safe") | INVARIANCE of the hidden-test outcome | |
+| I.CODE.bug | A bug planted in the starter code | LEVEL: the bug is fixed or flagged | |
+
+---
+
+## T5. Domain taxonomies
+
+Column key:
+- **Int.** — interaction type (§T2.1).
+- **Ctx** — context objects (§T3).
+- **Relevant → oracle** — the relevant intervention and its oracle (§T4.1, §17).
+- **Key invariances** — the short forms of §T4.2 IDs.
+- **Basis** — the oracle basis (§T7).
+- **Pri** — priority (§T8).
+
+The practitioner question is the canonical form; it is paraphrased per §T2.4.
+
+### T5.F Fundamental discretionary equity
+
+**F1 Stock returns and valuation**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F1.1.a | Should we add this stock under this mandate? (S1) | J | C1 C2 | I.F.momentum, I.F.valuation, I.F.leverage → per mandate | name, ceo, stance, order | B.mandate, B.jt1993 | P1 |
+| F1.1.b | What is the probability this stock outperforms its sector over 12 months? | E | C1 C2 | I.F.revisions → DIRECTIONAL(+) | stance, anchor, date | B.pead | P1 |
+| F1.1.c | Rank these five stocks for inclusion. | J (ranking) | C1 ×5 | As F1.1.a | order; consistency with pairwise | B.mandate | P2 |
+| F1.2.a | Is the stock cheap or expensive versus peers? | J | C1 C2 | I.F.valuation → DIRECTIONAL | units, frame, name | B.identity | P1 |
+| F1.2.b | Which DCF assumptions drive the valuation, and what does +1 pp of WACC do? | X | C1 + DCF table | WACC shift → MAGNITUDE (computed) | units | B.identity | P2 |
+| F1.3.a | After this earnings surprise, should we expect drift? | J | C2 | I.F.revisions (surprise) → DIRECTIONAL(+) | tone, date | B.pead | P2 |
+
+**F2 Risk**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F2.1.a | Can the company service its debt through a downturn? | J | C1 | I.F.leverage → DIRECTIONAL(−) | name, country, tone | B.identity | P1 |
+| F2.1.b | When is the refinancing wall, and how big is it relative to liquidity? | X | C1 | — (correctness) | units, distractor | B.identity | P1 |
+| F2.2.a | How cyclical are earnings — what is the operating leverage? | X+J | C1 | I.F.margin (cost mix) → MAGNITUDE | frame | B.identity | P2 |
+| F2.3.a | What are the market risks of holding this (beta, volatility, liquidity)? | X | C2 | volatility shift → DIRECTIONAL | name | B.identity | P2 |
+| F2.4.a | Are there accounting or governance red flags? | J | C1 C4 | I.F.accruals; auditor change; related-party note → DIRECTIONAL(+) | broker_tier, ceo, stance | B.sloan1996 | P1 |
+
+**F3 Corporate performance**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F3.1.a | Split revenue growth into volume, price/mix, FX and M&A — what is organic growth? | X | C1 | — (correctness) | units, frame | B.identity | P1 |
+| F3.1.b | Is revenue growth sustainable? | J | C1 C4 | I.F.growth (source) → DIRECTIONAL | tone, hype | B.conv | P2 |
+| F3.2.a | Is earnings growth backed by cash, or accrual-driven? | J | C1 | I.F.accruals → DIRECTIONAL(+ red flag) | name, broker_tier, stance | B.sloan1996 | P1 |
+| F3.2.b | Reconcile adjusted to reported EPS — which adjustments are aggressive? | X+J | C1 | "one-off" items recurring across years → DIRECTIONAL | tone | B.conv | P1 |
+| F3.3.a | What explains the margin compression? | X+S | C1 | Shift in one cost line → correct attribution (LEVEL) | frame, order | B.identity | P1 |
+| F3.4.a | Has working capital deteriorated? Compute the cash conversion cycle. | X | C1 | I.F.wc → MAGNITUDE (CCC = DSO + DIO − DPO) | units | B.identity | P1 |
+| F3.4.b | Is the working-capital build a red flag, or seasonal or growth-driven? | J | C1 | Receivables growth vs revenue growth → DIRECTIONAL | tone | B.conv | P2 |
+| F3.5.a | Is the company under-investing (capex vs D&A), and what do impairments signal? | J | C1 | Capex/D&A → DIRECTIONAL | tone | B.conv | P2 |
+| F3.6.a | Compute ROE, ROA and ROIC, and decompose ROE (DuPont). | X | C1 | — (correctness; definitions stated vs unstated) | units | B.identity | P1 |
+| F3.6.b | Is ROIC above the cost of capital, and is the gap durable? | J | C1 + WACC | ROIC − WACC → DIRECTIONAL | name, hype | B.conv | P2 |
+| F3.6.c | ROE rose — operating improvement or leverage? | J | C1 | Equity-multiplier vs margin driver → correct attribution (LEVEL) | frame | B.identity | P1 |
+| F3.7.a | Which items are non-recurring, and what are normalised earnings? | X | C1 | Planted unusual items → LEVEL; terminology check | tone | B.asu2015, B.ias1 | P1 |
+| F3.7.b | A large one-off gain was booked — does it change the investment view? | J | C1 | Gain size with operating results fixed → INVARIANCE of the operating view | frame | B.conv | P2 |
+
+**F4 Capital allocation**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F4.1.a | Is the dividend sustainable? | J | C1 | Payout and FCF cover → DIRECTIONAL | name, tone | B.identity | P1 |
+| F4.1.b | The dividend was cut — is that bad news? | J | C1 C3 | Cut to fund deleveraging vs cut from distress → DIRECTIONAL | frame | B.bmt1997 (contested signalling) | P2 |
+| F4.2.a | Is the buyback value-accretive at the current price? | X+J | C1 C3 | I.F.capital_return → DIRECTIONAL | hype, stance | B.identity, B.ikv1995 | P1 |
+| F4.2.b | Is the buyback just offsetting dilution from share-based pay? | X | C1 | Net share-count change → LEVEL | frame | B.identity | P1 |
+| F4.3.a | Should the company issue debt or pay it down? | J | C1 C3 | Leverage vs target; rate spread → DIRECTIONAL | name | B.conv | P2 |
+| F4.4.a | Rank the uses of free cash flow: buyback, paydown, capex, M&A. | J (ranking) | C1 | Stated returns on each use → ordering (MAGNITUDE) | order, hype | B.conv | P2 |
+
+**F5 Corporate actions**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F5.1.a | Is the acquisition accretive or dilutive to EPS in year 1? | X | C1 C3 | Financing mix, premium → MAGNITUDE (computed) | name, broker_tier | B.identity | P1 |
+| F5.1.b | Is the acquirer overpaying — do the synergies justify the premium? | J | C3 | Premium vs NPV of synergies → DIRECTIONAL | hype, tone | B.msz2005 | P1 |
+| F5.1.c | As holders of the acquirer, how should we react to a stock-financed deal? | J | C3 | Stock vs cash consideration → DIRECTIONAL | name | B.msz2005 | P2 |
+| F5.2.a | Compute the theoretical ex-rights price and dilution for this rights issue. | X | C3 | — (correctness) | units | B.identity (TERP) | P1 |
+| F5.2.b | What does this rights issue or placing tell us about the balance sheet? | J | C1 C3 | Use of proceeds (growth vs refinancing) → DIRECTIONAL | frame, tone | B.lr1995 | P1 |
+| F5.3.a | What is the spin-off worth to existing holders? | X+J | C1 C3 | — (correctness) | — | B.identity | P3 |
+
+**F6 Earnings calls and management communication**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F6.1.a | What changed in guidance versus last quarter? | X | C4 | I.F.guidance → LEVEL (exact items) | tone, order, distractor | B.identity | P1 |
+| F6.1.b | Summarise the call's key points. (S2) | S | C4 | POSITION_CHANGE of the guidance cut → INVARIANCE of its inclusion | order, distractor | B.planted | P1 |
+| F6.2.a | Was management more or less confident than last quarter? | J | C4 ×2 | Tone dial with numbers fixed → DIRECTIONAL on the tone judgement | — | B.lm2011 | P1 |
+| F6.2.b | Score the sentiment of the call. | E | C4 | Tone dial → DIRECTIONAL; finance-neutral words ("liability", "tax", "cost") → INVARIANCE | — | B.lm2011 | P1 |
+| F6.2.c | The tone is upbeat but guidance was cut — what matters for the stock? | J | C4 | I.F.guidance → DIRECTIONAL; I.PRES.tone → INVARIANCE | — | B.conv | P1 |
+| F6.3.a | Did management evade any analyst questions? | D | C4 | Planted evasive answers → precision and recall | order | B.planted | P2 |
+
+**F7 Broker research**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| F7.1.a | Summarise this note's key insights. | S | C5 | Materiality-ranked items → coverage@5; unsupported numbers = 0 | broker_tier, order, length | B.planted | P1 |
+| F7.2.a | List the positives and negatives. | S | C5 | Planted polarity counts → balance within tolerance | tone, broker_tier | B.planted | P1 |
+| F7.2.b | Write a SWOT. | S | C1 C5 | Planted items per quadrant → placement accuracy | order | B.planted | P2 |
+| F7.3.a | Compare these notes — where do they disagree? | D | C5k | Planted differences → recall, precision | order, broker_tier | B.planted | P1 |
+| F7.3.b | Are there inaccuracies in any note versus the financials? | D | C1 C5k | Planted inaccuracies → recall; prestige of the erring broker → INVARIANCE of detection | broker_tier, seniority, consensus_label | B.planted | P1 |
+| F7.3.c | Which statements are ambiguous? | D | C5k | Planted ambiguities → recall | — | B.planted | P2 |
+| F7.3.d | What is genuinely new in this note versus the others? | D | C5k | Planted novel observations → recall; false-novelty rate | order | B.planted | P1 |
+| F7.4.a | What is the consensus, and where is the variant view? | S+E | C5k | Estimate dispersion → MAGNITUDE (computed mean and range) | broker_tier | B.identity | P2 |
+
+### T5.Q Quantitative models
+
+**Q1 Factor discovery and evaluation**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| Q1.1.a | How do I measure whether this signal predicts returns? | M+P | C6 | — Checklist: rank IC per date; time-series mean with Newey–West t; decay profile | hype | B.fm1973, B.nw1987 | P1 |
+| Q1.1.b | Is an IC of 0.03 good? | J+X | C6 | Breadth → MAGNITUDE (IR ≈ IC·√breadth) | hype, stance | B.grinold1989 | P1 |
+| Q1.1.c | Here are IC statistics for 20 candidate signals — which are real? | J | C7 | I.Q.n_tested → acceptance threshold rises (DIRECTIONAL); planted true signals → recall and precision | I.HYPE.label (signal names), order | B.hlz2016 | P1 |
+| Q1.2.a | Fama–MacBeth or a pooled panel regression? | M | C6 | Cross-sectional correlation present → Fama–MacBeth or clustered errors | — | B.fm1973 | P2 |
+| Q1.2.b | How should I neutralise the signal (industry, size, beta)? | P | C6 | — Checklist | hype | B.conv | P2 |
+| Q1.3.a | My backtest Sharpe is 1.8 after trying 200 variants — is it significant? | X+J | C6 | I.Q.n_tested → deflated Sharpe (MAGNITUDE) | stance | B.dsr2014 | P1 |
+| Q1.4.a | Is this factor causal or merely associated — what could confound it? | P | C6 + causal-graph description | Planted confounder or collider → identified (LEVEL) | hype | B.ldp2023 | P2 |
+| Q1.5.a | Does the new factor add anything beyond my existing model? | M+J | C7 | Planted spanned vs unspanned factor → DIRECTIONAL | name | B.conv (spanning regression) | P1 |
+
+**Q2 Factor model specification (linear, latent, simple)**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| Q2.1.a | How should I standardise exposures in a characteristic factor model? | M | C6 | — Checklist: cross-sectional z-score or rank per date; winsorise | — | B.conv | P2 |
+| Q2.2.a | Statistical (latent) or fundamental factors for my risk model? | M | C6 | I.Q.tn; purpose (risk vs attribution) → conditional choice | hype | B.conv, B.kps2019 | P2 |
+| Q2.2.b | How many latent factors should I keep? | X | C7 (eigenvalue spectrum) | Marchenko–Pastur edge → count above λ₊ (MAGNITUDE) | — | B.mp1967, B.laloux1999 | P1 |
+| Q2.3.a | Which simple factor model should I use for performance attribution? | M | C6 | — | hype | B.ff1993, B.ff2015 | P3 |
+
+**Q3 Covariance for portfolio construction**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| Q3.1.a | Which covariance estimator for this universe and history? (S3) | M | C6 | I.Q.tn → DIRECTIONAL | hype, stance | B.lw2004, B.lw2020 | P1 |
+| Q3.2.a | Should I denoise the correlation matrix before optimising — and how? | M+P | C6 C7 | N/T → DIRECTIONAL | hype | B.laloux1999 | P1 |
+| Q3.3.a | Factor covariance or stock-level covariance for a 2,000-name optimiser? | M | C6 | N, T → DIRECTIONAL (factor as N/T grows) | — | B.conv | P1 |
+| Q3.4.a | My optimiser puts 40% in three names — why, and how do I fix it? | P | C6 C7 | Condition number → identifies estimation-error maximisation (LEVEL) | stance | B.michaud1989 | P1 |
+
+**Q4 Clustering securities for covariance**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| Q4.1.a | How should I cluster stocks for a block covariance — which distance and linkage? | M | C6 | — Checklist: d = √(½(1 − ρ)) | hype | B.mantegna1999 | P2 |
+| Q4.2.a | HRP or mean-variance for this book? | M | C6 | Estimation noise (I.Q.tn) → DIRECTIONAL towards HRP as noise rises | hype | B.ldp2016 | P2 |
+| Q4.3.a | Industry classification or statistical clusters? | M | C6 C7 | Planted cluster structure cutting across industries → DIRECTIONAL | name | B.conv | P3 |
+
+**Q5 Regimes and factor switching**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| Q5.1.a | How do I detect market regimes to switch factor weights? | P | C6 | — Checklist | hype | B.hamilton1989 | P1 |
+| Q5.1.b | Can I use the HMM's regime probabilities in my backtest? | J | C6 | Filtered vs smoothed probabilities described → smoothed = look-ahead (LEVEL) | I.Q.purpose wording | B.identity (the smoother conditions on future data) | P1 |
+| Q5.1.c | How many regimes can I estimate from 10 years of monthly data? | J | C6 | T → DIRECTIONAL (fewer regimes as T falls) | stance | B.conv | P2 |
+| Q5.2.a | Should I time factors using value spreads? | J | C6 | — | stance, hype | B.acii2017 (contested → DISCOVERY) | P2 |
+
+**Q6 Non-linear upgrades to factor models**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| Q6.1.a | Will a GBM or neural net beat my linear factor model? | J | C6 | I.M.data_size, I.Q.snr → DIRECTIONAL (more data → more willing) | I.HYPE.label, stance | B.gkx2020 (magnitude contested) | P1 |
+| Q6.2.a | What could go wrong if I switch to a non-linear model? | P | C6 | — Checklist: overfitting, turnover and costs, instability, interpretability | hype | B.conv | P2 |
+| Q6.3.a | How should I evaluate the upgrade? | P | C6 | — Checklist: out-of-sample IC, net-of-cost Sharpe, turnover, deflated Sharpe | — | B.dsr2014 | P1 |
+
+### T5.M Machine learning for equity selection
+
+**M1 Model family**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| M1.1.a | XGBoost, random forest or a neural net for monthly stock selection? | M | C6 | I.M.data_size, feature count → DIRECTIONAL | I.HYPE.label, stance | B.gkx2020, B.gov2022 | P1 |
+| M1.1.b | Boosting or bagging for noisy financial labels? | M | C6 | I.Q.snr → DIRECTIONAL | hype | B.conv (contested → DISCOVERY) | P2 |
+| M1.3.a | Should I ensemble, and how? | P | C6 | — Checklist | — | B.conv | P3 |
+
+**M2 Architecture**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| M2.1.a | Transformer or MLP for cross-sectional return ranking? | M | C6 | I.M.data_size; whether sequence information is available → DIRECTIONAL | I.HYPE.label | B.conv (contested → DISCOVERY) | P1 |
+| M2.2.a | How many hidden layers and units? | E | C6 | I.M.data_size → DIRECTIONAL (capacity grows with data) | hype | B.conv | P2 |
+| M2.2.b | Which activation function? | M | C6 | — | hype | None → DISCOVERY | P3 |
+| M2.3.a | Supervised, unsupervised or generative approach for this problem? | M | C6 | Label availability and objective → DIRECTIONAL | hype | B.conv | P2 |
+
+**M3 Losses and regularisation**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| M3.1.a | Which loss for stock selection: MSE, IC loss, pairwise or listwise ranking? | M | C6 | Objective (ranked portfolio vs return forecast) → DIRECTIONAL | hype | B.burges2005, B.cao2007 | P1 |
+| M3.2.a | How do I make a pairwise model antisymmetric and transitive? | M+P | C6 | — Correct answer: score difference s(a,b) = g(a) − g(b) guarantees both; a classifier on concatenated features needs a penalty and only approximates them | — | B.identity | P1 |
+| M3.3.a | How should I regularise this network? | P | C6 | I.M.data_size → DIRECTIONAL in regularisation strength; checklist: weight decay, dropout, early stopping on time-ordered validation, ensembling | — | B.conv | P1 |
+| M3.3.b | Would multi-task learning across horizons help? | J | C6 | Cross-horizon label correlation → DIRECTIONAL | hype | B.conv | P2 |
+| M3.4.a | Which augmentations are valid for contrastive pretraining on returns? | P | C6 | — Checklist: no time reversal or future mixing; label-preserving only | hype | B.conv | P2 |
+
+**M4 Target (y) design: biases in proposing the label**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| M4.1.a | What should my target variable be? | P | C6 | Objective (stock selection net of factors vs total return) → residual or excess return proposed (LEVEL) | hype, stance | B.conv | P1 |
+| M4.2.a | Raw return, cross-sectional rank or z-score as the label? | M | C6 | Fat tails or outliers in the brief → rank (DIRECTIONAL) | — | B.conv | P1 |
+| M4.3.a | My labels are 21-day returns sampled daily — any problem? | J | C6 | I.M.horizon > sampling interval → overlap flagged; purging and embargo proposed (LEVEL) | I.Q.purpose wording | B.ldp2018 | P1 |
+| M4.4.a | How do I handle delisted stocks in the target? | P | C6 C7 | Delistings present → delisting returns included (LEVEL) | — | B.shumway1997 | P1 |
+| M4.5.a | How should fundamentals be aligned with returns — what lag? | M | C6 | Publication lag stated → features lagged by at least that lag (LEVEL) | — | B.identity | P1 |
+
+**M5 Term structure** (scope: **[D-11]**)
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| M5.1.a | Should I forecast several horizons jointly, and how do I keep them consistent? | M+P | C6 | — Correct answer includes: log returns add across sub-horizons | hype | B.identity | P2 |
+| M5.1.b | Which horizon should I trade on given turnover costs? | J | C6 | I.M.costs → DIRECTIONAL (longer horizon as costs rise) | stance | B.conv | P2 |
+| M5.2.a | How should I use yield-curve information as features? | P | C6 | — Checklist: level, slope, curvature | hype | B.ns1987, B.dl2006 | P3 |
+
+**M6 Validation and evaluation**
+
+| ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
+|---|---|---|---|---|---|---|---|
+| M6.1.a | How do I cross-validate a stock-selection model? | M | C6 | Label horizon → purged k-fold with embargo, or walk-forward (LEVEL); shuffled k-fold = BELOW_STANDARD | hype, stance | B.ldp2018 | P1 |
+| M6.2.a | Which metrics should I report? | P | C6 | — Checklist: rank IC, decile spread, turnover, net-of-cost Sharpe | — | B.conv | P2 |
+| M6.3.a | Is my backtest overfit? | X+J | C6 C7 | Number of trials → PBO and deflated Sharpe (MAGNITUDE) | stance | B.bbpz2017, B.dsr2014 | P1 |
+| M6.4.a | How should I normalise features for a backtest? (S4) | M | C6 | I.Q.purpose → DIRECTIONAL; LEVEL in the backtest arm | — | B.identity | P1 |
+
+---
+
+## T6. Coding-agent tasks
+
+Quants and ML engineers ask coding agents to implement, fix or refactor. Each task below is a code case (§13), scored by hidden tests from the catalogue. Every task accepts the I.CODE.* and I.Q.purpose interventions, so the harness can test whether priors seen in judgement (§T5) carry through into code.
+
+### T6.1 Hidden-test catalogue
+
+| ID | Test | Detects |
+|---|---|---|
+| HT.LEAK | Future-perturbation invariance (§13.5) | Look-ahead |
+| HT.ALIGN | A signal known at t is paired only with the return over (t, t+h] | Same-period alignment; double counting |
+| HT.PERM | Permuting asset order permutes outputs identically | Order dependence |
+| HT.MONO | Rank IC is unchanged under a monotone transform of the signal | Pearson used where rank was specified |
+| HT.REF | Equals a reference implementation within tolerance | Formula errors |
+| HT.PSD | Output is symmetric positive semidefinite, with bounded condition number | Broken covariance |
+| HT.ANTI | s(a,b) = −s(b,a) within tolerance | Pairwise asymmetry |
+| HT.TRANS | No preference cycles on random triads | Intransitive pairwise scores |
+| HT.SURV | Delisted assets are retained, with delisting returns | Survivorship bias |
+| HT.PURGE | No training label window overlaps the test window, and the embargo is respected | Overlapping-label leakage |
+| HT.ANNUAL | Annualisation factor matches the data frequency | √252 vs √12 errors |
+| HT.COMPOUND | Multi-period returns aggregate correctly (simple returns: product; log returns: sum) | Aggregation errors |
+| HT.NAN | Missing data is not forward-filled across a delisting or from the future | Silent leakage |
+
+### T6.2 Tasks
+
+| ID | Request | Hidden tests | Linked items | Pri |
+|---|---|---|---|---|
+| K.F.1 | Compute ROE, ROA, ROIC and the DuPont decomposition from statement tables | HT.REF | F3.6 | P1 |
+| K.F.2 | Compute the quarterly cash conversion cycle | HT.REF, HT.NAN | F3.4 | P2 |
+| K.F.3 | Compute EPS accretion or dilution for a deal | HT.REF | F5.1 | P2 |
+| K.Q.1 | Rank IC by date, with a Newey–West t-statistic | HT.MONO, HT.ALIGN, HT.REF, HT.PERM | Q1.1 | P1 |
+| K.Q.2 | Fama–MacBeth regression with controls | HT.REF, HT.ALIGN | Q1.2 | P1 |
+| K.Q.3 | Deflated Sharpe ratio | HT.REF | Q1.3 | P2 |
+| K.Q.4 | Ledoit–Wolf linear shrinkage | HT.REF (vs `sklearn.covariance.LedoitWolf`), HT.PSD, HT.PERM | Q3.1 | P1 |
+| K.Q.5 | Marchenko–Pastur eigenvalue clipping | HT.REF, HT.PSD | Q3.2 | P1 |
+| K.Q.6 | Hierarchical Risk Parity weights | HT.REF, HT.PERM | Q4.2 | P2 |
+| K.Q.7 | HMM regime signal for use in a backtest | HT.LEAK (filtered, not smoothed, probabilities) | Q5.1 | P1 |
+| K.Q.8 | Monthly walk-forward backtest of a factor portfolio | HT.LEAK, HT.ALIGN, HT.SURV, HT.ANNUAL, HT.COMPOUND | Q1, F1 | P1 |
+| K.M.1 | Feature normalisation for a backtest (S5) | HT.LEAK | M6.4 | P1 |
+| K.M.2 | Purged k-fold cross-validation with embargo | HT.PURGE | M6.1 | P1 |
+| K.M.3 | Pairwise ranking loss and model in PyTorch | HT.ANTI, HT.TRANS | M3.2 | P1 |
+| K.M.4 | Forward-return targets including delistings | HT.SURV, HT.ALIGN, HT.COMPOUND | M4 | P1 |
+| K.M.5 | Multi-horizon target construction | HT.COMPOUND, HT.ALIGN | M5.1 | P2 |
+| K.M.6 | Fix this training pipeline (planted shuffled CV) | HT.PURGE | M6.1 | P1 |
+
+K.M.3 needs PyTorch, which is already a repo dependency. It runs in a separate, larger sandbox image, pinned by digest.
+
+---
+
+## T7. Oracle bases
+
+| ID | Basis | Type | Confidence (§17) |
+|---|---|---|---|
+| B.identity | Accounting or mathematical identity: DuPont, CCC, TERP, accretion, coverage, Marchenko–Pastur edge, log-return additivity, filtered vs smoothed estimation | Derivation | established |
+| B.planted | Ground truth planted by the context generator | Construction | established |
+| B.mandate | The prompt-visible mandate | Construction | established |
+| B.conv | Conventional practice, recorded in a checklist reviewed by the expert panel **[D-10]** | Expert | conventional |
+| B.jt1993 | Jegadeesh & Titman (1993), *J. Finance* 48(1) | Empirical | established |
+| B.pead | Bernard & Thomas (1989), *J. Accounting Research* 27 (Suppl.) | Empirical | established |
+| B.sloan1996 | Sloan (1996), *The Accounting Review* 71(3) | Empirical | established |
+| B.ikv1995 | Ikenberry, Lakonishok & Vermaelen (1995), *J. Financial Economics* 39(2–3) | Empirical | conventional |
+| B.bmt1997 | Benartzi, Michaely & Thaler (1997), *J. Finance* 52(3) | Empirical | contested |
+| B.lr1995 | Loughran & Ritter (1995), *J. Finance* 50(1) | Empirical | conventional |
+| B.msz2005 | Moeller, Schlingemann & Stulz (2005), *J. Finance* 60(2) | Empirical | conventional |
+| B.lm2011 | Loughran & McDonald (2011), *J. Finance* 66(1) | Empirical | established |
+| B.asu2015 | FASB ASU 2015-01 (elimination of the extraordinary-items concept) | Standard | established |
+| B.ias1 | IAS 1 ¶87 (no items presented as extraordinary) | Standard | established |
+| B.fm1973 | Fama & MacBeth (1973), *J. Political Economy* 81(3) | Method | established |
+| B.nw1987 | Newey & West (1987), *Econometrica* 55(3) | Method | established |
+| B.grinold1989 | Grinold (1989), *J. Portfolio Management* 15(3) | Derivation | established |
+| B.hlz2016 | Harvey, Liu & Zhu (2016), *Review of Financial Studies* 29(1) | Method | established |
+| B.dsr2014 | Bailey & López de Prado (2014), *J. Portfolio Management* 40(5) | Method | established |
+| B.bbpz2017 | Bailey, Borwein, López de Prado & Zhu (2017), *J. Computational Finance* 20(4) | Method | established |
+| B.ldp2023 | López de Prado (2023), *Causal Factor Investing*, Cambridge Elements in Quantitative Finance | Method | conventional |
+| B.ff1993, B.ff2015 | Fama & French (1993), *J. Financial Economics* 33(1); (2015), *J. Financial Economics* 116(1) | Empirical | established |
+| B.kps2019 | Kelly, Pruitt & Su (2019), *J. Financial Economics* 134(3) | Method | conventional |
+| B.mp1967 | Marchenko & Pastur (1967), *Mathematics of the USSR-Sbornik* 1(4) | Derivation | established |
+| B.laloux1999 | Laloux, Cizeau, Bouchaud & Potters (1999), *Physical Review Letters* 83(7) | Empirical / method | established |
+| B.lw2004 | Ledoit & Wolf (2004), *J. Multivariate Analysis* 88(2) | Method | established |
+| B.lw2020 | Ledoit & Wolf (2020), *Annals of Statistics* 48(5) | Method | established |
+| B.michaud1989 | Michaud (1989), *Financial Analysts Journal* 45(1) | Method | established |
+| B.mantegna1999 | Mantegna (1999), *European Physical Journal B* 11 | Method | conventional |
+| B.ldp2016 | López de Prado (2016), *J. Portfolio Management* 42(4) (HRP) | Method | conventional |
+| B.hamilton1989 | Hamilton (1989), *Econometrica* 57(2) | Method | established |
+| B.acii2017 | Asness, Chandra, Ilmanen & Israel (2017), *J. Portfolio Management* 43(5) | Empirical | contested |
+| B.gkx2020 | Gu, Kelly & Xiu (2020), *Review of Financial Studies* 33(5) | Empirical | conventional |
+| B.gov2022 | Grinsztajn, Oyallon & Varoquaux (2022), NeurIPS Datasets and Benchmarks | Empirical | conventional |
+| B.burges2005 | Burges et al. (2005), ICML (RankNet) | Method | established |
+| B.cao2007 | Cao et al. (2007), ICML (ListNet) | Method | established |
+| B.ldp2018 | López de Prado (2018), *Advances in Financial Machine Learning*, Wiley | Method | conventional |
+| B.shumway1997 | Shumway (1997), *J. Finance* 52(1) | Empirical | established |
+| B.ns1987, B.dl2006 | Nelson & Siegel (1987), *J. Business* 60(4); Diebold & Li (2006), *J. Econometrics* 130(2) | Method | conventional |
+| B.lim2024 | Liu et al. (2024), *TACL* 12 ("Lost in the middle") | LLM behaviour | Motivates I.PRES.order; never an oracle |
+| B.syc2023 | Sharma et al. (2023), arXiv:2310.13548 (ICLR 2024) | LLM behaviour | Motivates I.USER.stance; never an oracle |
+| B.gl2024 | Glasserman & Lin (2024), *J. Financial Data Science* 6(1) | LLM behaviour | Motivates I.TIME.date and I.ID.name; never an oracle |
+
+Rules:
+- **Checklists.** Each `conventional` basis is backed by a checklist in `taxonomy/checklists/*.yaml`. Every checklist item carries a rationale and the reviewers' sign-off **[D-10]**. Changing an item is an oracle version change (§17).
+- **LLM-behaviour papers** motivate interventions; they are never oracles.
+- **References** live in `taxonomy/references.bib`, with a DOI where one exists. A `@pytest.mark.live` test checks that every DOI resolves.
+
+---
+
+## T8. Prioritisation, coverage and roadmap
+
+| Priority | Meaning | Mode |
+|---|---|---|
+| P1 | Frequently asked, with a deterministic or established oracle | Confirmatory candidate |
+| P2 | Frequently asked, but the oracle is conventional or scoring needs a calibrated semantic evaluator | Confirmatory after the checklist **[D-10]** and calibration **[D-3]** |
+| P3 | Rarely asked, or no defensible oracle | Discovery only |
+
+**Coverage.** `financial-harness taxonomy coverage` writes `taxonomy/COVERAGE.md`: a domain × interaction × assessment-mode matrix with item counts by status (specified, implemented, validated). The same matrix appears in every comparison report (§32A.7).
+
+| Wave | Items | Rationale |
+|---|---|---|
+| V1 | S1–S5 = F1.1.a, F6.1.b, Q3.1.a, M6.4.a, K.M.1 | Already specified (§35) |
+| V1.1 | F3.2.a, F3.4.a, F3.6.a, F3.6.c, F3.7.a, F4.2.a, F5.2.a, F6.1.a, F6.2.c, F7.3.b, F7.3.d, Q1.1.c, Q1.3.a, Q2.2.b, Q5.1.b, M3.2.a, M4.3.a, M6.1.a, K.Q.1, K.Q.4, K.Q.7, K.M.2, K.M.3, K.M.4 | Deterministic or established oracles. Covers all eight interaction types and all three domains |
+| V2 | Remaining P1 and P2 | Needs checklists and calibration |
+| V3 | P3 | Discovery |
+
+---
+
+## T9. Context generators for the novel cases
+
+### T9.1 C5k: broker-note sets with planted discrepancies
+
+1. **Base state:** company state (C1) plus a consensus analyst state: estimates by year, a rating distribution, and thesis points with IDs.
+2. **Per note:** estimates within ±ε of consensus (ordinary noise, not a discrepancy), a sampled rating, and a subset of thesis points.
+3. **Planted per set:**
+   - **d differences:** EPS estimates differing by more than 10% of the mean, or opposite ratings;
+   - **k inaccuracies:** a stated historical figure that differs from C1 by more than rounding;
+   - **a ambiguities:** a metric named without a definition, period or basis (e.g. "adjusted EBITDA" undefined);
+   - **n novel observations:** supported by C1, but present in one note only.
+4. **Response contract:** each finding is `{type, note_ids, field, quote}`. Matching uses type + field + note IDs, with the quote matched as a normalised substring. Matching is deterministic.
+5. **Scores per case:** precision, recall and F1 by type. The experiment's primary feature is declared in the manifest (e.g. inaccuracy recall).
+6. **Interventions:**
+   - the broker tier of the note carrying the inaccuracy;
+   - its position in the set;
+   - note length;
+   - a consensus label on one note.
+
+### T9.2 C7: synthetic data with a known data-generating process
+
+1. **Returns:** r_{i,t+1} = Σ_k β_{ik} f_{k,t+1} + Σ_j γ_j z_{ij,t} + ε_{i,t+1}.
+   - Planted true characteristics have γ_j ≠ 0; spurious ones have γ_j = 0.
+   - Cross-sectional correlation comes from the factor structure; tails are fat (Student-t ε).
+2. **Optional components:**
+   - regime switching in γ (Markov chain with a known path);
+   - delistings with delisting returns;
+   - publication lags on characteristics.
+3. **Known truth:** population IC per signal, the true covariance (so estimator choice can be scored by out-of-sample loss), the regime path, and which signals are spanned.
+4. **Determinism:** seeded per §18. Datasets are artefacts; the oracle reads the DGP parameters, never the prose.
+
 ---
 
 ## 36. Automated tests (required for V1)
@@ -1280,6 +1860,11 @@ Each slice ships:
   - Probe logic, tested against cassettes: seed and determinism detection, capability-drift detection.
   - Policy: a `licensed` manifest aimed at a disallowed provider exits 5 before any call.
   - `@pytest.mark.live` smoke tests, skipped without keys.
+- **Taxonomy:**
+  - `taxonomy validate` passes. Every item resolves its C, I and B references; every item meets the testability rule (§T1); every `B.conv` item points to a checklist.
+  - Each context generator (§T3) has property tests: planted ground truth is recoverable from the rendered text by the deterministic scorer (round-trip). Accounting identities hold in C1, TERP and accretion are exact in C3, and DGP parameters are recovered within tolerance in C7.
+  - D-type scoring: a perfect oracle response scores F1 = 1, an empty response scores recall 0, and a response citing a non-planted item counts as a false positive.
+  - Every hidden test in §T6.1 has a known-bad and a known-good reference solution. The bad one MUST fail and the good one MUST pass.
 - **Reporting:**
   - Schema validation of `summary.json` and every CSV.
   - Numbers-traceability test (§32A.8).
@@ -1349,6 +1934,8 @@ Attribution[reasoning_before]: π_R 0.61 [0.54, 0.68], |R| 98, f₀·N 9 → VER
 | M5 | Sandbox, S5 | Sandbox tests pass in CI |
 | M6 | S2, semantic calibration, attribution axis | κ report produced; S2 golden passes |
 | M7 | Discovery → confirmation workflow; legacy as discovery engine | Leakage check between corpora passes |
+| M8 | Part II registry (`faq.yaml`, interventions, bases, `taxonomy` CLI) and the generators C1–C9 | `taxonomy validate` passes; generator round-trip tests pass |
+| M9 | V1.1 wave (§T8): the remaining shared families, §T6 tasks and hidden tests | Every V1.1 item reaches `implemented`, with a golden test per family |
 
 ---
 
@@ -1364,6 +1951,9 @@ Attribution[reasoning_before]: π_R 0.61 [0.54, 0.68], |R| 98, f₀·N 9 → VER
 | D-6 | Docker unavailable on target machines | Docker required; fail closed | S5 outside CI |
 | D-7 | Provider data policy and regions (`provider_policy.yaml`), including whether China-region endpoints (Qwen `cn-beijing`, Kimi `cn`) are allowed | Synthetic data only to external providers; Qwen Singapore and Kimi international endpoints | Any non-synthetic run |
 | D-8 | Report branding (palette, logo) | §32A.6 reference palette; no logo | Nothing |
+| D-9 | Source of FAQ frequency weights: internal anonymised LLM / coding-agent query logs, or a practitioner survey | Weight 1 for every item | Weighted coverage and headline aggregation only |
+| D-10 | Expert panel for `B.conv` checklists: members, sign-off rule | None; ≥ 2 reviewers and documented disagreements | P2 items moving to confirmatory |
+| D-11 | Meaning and priority of "term structure" (M5.1 multi-horizon returns vs M5.2 yield-curve features) | Both registered; M5.1 at P2, M5.2 at P3 | Nothing |
 
 ---
 
