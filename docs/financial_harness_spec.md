@@ -924,6 +924,8 @@ financial-harness compare  RUN_ID [RUN_ID ...] --name NAME   # cross-run label m
 financial-harness models   list --provider P [--region R]     # model IDs from the provider's models endpoint
 financial-harness probe    MODEL_KEY [--region R]             # capability probe (§20.4)
 financial-harness taxonomy validate | coverage | list [--domain F|Q|M|K] [--priority P1]   # Part II registry
+financial-harness taxonomy survey-export [--role ROLE]                                    # survey instrument (§T10.2)
+financial-harness taxonomy weights --responses PATH                                       # survey weights (§T10.3)
 ```
 
 Exit codes: 0 OK · 1 error · 2 validation failure · 3 budget stop · 4 incomplete run · 5 policy refusal (§2.14) · 6 stale or missing probe.
@@ -1178,7 +1180,8 @@ financial_llm_harness/
                    broker_synthesis/ quant_method_choice/ quant_dgp/ ml_design/ code_task/   (§34)
                    (each: family.yaml, family.py, templates/, fixtures/; V1 slices S1–S5 live inside these)
     contexts/      statements.py market.py corporate_action.py transcript.py broker_notes.py brief.py dgp.py   (§T3, §T9)
-    taxonomy/      faq.yaml interventions.yaml bases.yaml references.bib checklists/ COVERAGE.md   (Part II)
+    taxonomy/      faq.yaml interventions.yaml bases.yaml references.bib checklists/ COVERAGE.md
+                   survey/ (instrument.yaml) weights.yaml panel.yaml   (Part II, §T10)
     models/        base.py fake.py openai_compatible.py anthropic.py gemini_native.py probe.py providers.yaml
     provider_policy.yaml   pricing.yaml
     evaluation/    parse.py rules.py code_static.py sandbox.py semantic.py calibration.py
@@ -1198,7 +1201,7 @@ Do not add abstraction beyond these boundaries until a second implementation nee
 
 ## 34. Assessment catalogue
 
-The full catalogue of what is assessed is Part II (§T0–§T9). It is implemented by nine shared task families. A new FAQ item is a registry entry, not new infrastructure.
+The full catalogue of what is assessed is Part II (§T0–§T10). It is implemented by nine shared task families. A new FAQ item is a registry entry, not new infrastructure.
 
 | Family | Serves | Context objects (§T3) |
 |---|---|---|
@@ -1290,13 +1293,13 @@ There are three domains:
 
 Coding-agent tasks (§T6) cut across Q, M and the computational parts of F.
 
-**Evidence status.** The FAQ list is practitioner-elicited: it comes from the brief and standard investment-management practice, not from measured usage. Frequency weights for coverage and reporting MUST come from anonymised query logs or a practitioner survey **[D-9]**. Until then every item has weight 1, and priority comes from §T8.
+**Evidence status.** The FAQ list is practitioner-elicited: it comes from the brief and standard investment-management practice, not from measured usage. Frequency and stakes weights come from a practitioner survey (§T10, resolved **[D-9]**). Until the survey meets its sample threshold (§T10.3), every item has weight 1 and priority comes from §T8.
 
 **Terminology fixed for this Part:**
 - **"Extraordinary items"** no longer exist as a reporting category. They were removed from US GAAP by ASU 2015-01 and are prohibited under IFRS (IAS 1 ¶87). The harness uses "unusual or infrequent items" (US GAAP) and "exceptional items" (UK practice). A model that uses "extraordinary" in this sense fails the F3.7 terminology check.
 - **"Contextual modelling"** is not a standard term for clustering securities. The harness says "clustering for block or hierarchical covariance" (e.g. Hierarchical Risk Parity).
 - **"AB parity"** and **"triangular parity"** for pairwise or contrastive losses are named here **antisymmetry** (s(a,b) = −s(b,a)) and **transitivity**, or cycle consistency (a ≻ b ∧ b ≻ c ⇒ a ≻ c).
-- **"Term structure modelling"** is ambiguous. It can mean multi-horizon return forecasting (M5.1) or interest-rate term-structure features (M5.2). Both are included; priority is **[D-11]**.
+- **"Term structure modelling"** means **multi-horizon return forecasting**: the term structure of expected returns across horizons (resolved **[D-11]**). Interest-rate term-structure features (yield-curve level, slope, curvature) are out of scope.
 
 ---
 
@@ -1309,7 +1312,7 @@ Each FAQ item is an entry in `financial_llm_harness/taxonomy/faq.yaml`. A task f
   domain: fundamental                 # fundamental | quant_models | ml | code
   category: corporate_performance
   subcategory: earnings_quality
-  asker: fundamental_analyst          # fundamental_analyst | pm | quant_researcher | ml_engineer | risk_manager
+  asker: fundamental_analyst          # role code from §T10.1
   question: "Is this earnings growth backed by cash, or is it accrual-driven?"
   interaction: J                      # §T2.1
   elicitation: [binary, ordinal5, probability]   # §T2.2
@@ -1323,7 +1326,7 @@ Each FAQ item is an entry in `financial_llm_harness/taxonomy/faq.yaml`. A task f
   correctness_checks: [accruals_ratio, cfo_to_net_income]
   hypothesised_failure: "Accepts narrative growth without a cash-conversion check"
   priority: P1
-  weight: 1.0                         # replaced by [D-9]
+  weight: 1.0                         # from taxonomy/weights.yaml once the survey threshold is met (§T10.3)
   status: specified                   # specified | implemented | validated
 ```
 
@@ -1663,13 +1666,16 @@ The practitioner question is the canonical form; it is paraphrased per §T2.4.
 | M4.4.a | How do I handle delisted stocks in the target? | P | C6 C7 | Delistings present → delisting returns included (LEVEL) | — | B.shumway1997 | P1 |
 | M4.5.a | How should fundamentals be aligned with returns — what lag? | M | C6 | Publication lag stated → features lagged by at least that lag (LEVEL) | — | B.identity | P1 |
 
-**M5 Term structure** (scope: **[D-11]**)
+**M5 Multi-horizon return forecasting (term structure of expected returns)** (scope resolved **[D-11]**)
 
 | ID | Practitioner question | Int. | Ctx | Relevant → oracle | Key invariances | Basis | Pri |
 |---|---|---|---|---|---|---|---|
-| M5.1.a | Should I forecast several horizons jointly, and how do I keep them consistent? | M+P | C6 | — Correct answer includes: log returns add across sub-horizons | hype | B.identity | P2 |
-| M5.1.b | Which horizon should I trade on given turnover costs? | J | C6 | I.M.costs → DIRECTIONAL (longer horizon as costs rise) | stance | B.conv | P2 |
-| M5.2.a | How should I use yield-curve information as features? | P | C6 | — Checklist: level, slope, curvature | hype | B.ns1987, B.dl2006 | P3 |
+| M5.1.a | Should I forecast several horizons jointly, and how do I keep them consistent? | M+P | C6 | — Correct answer includes: log returns add across sub-horizons; shared trunk with horizon-specific heads, or a consistency penalty | hype | B.identity | P1 |
+| M5.1.b | How quickly does this signal's predictive power decay, and which horizon does it suit? | X+J | C7 (planted IC decay half-life) | Planted half-life → MAGNITUDE (horizon recommendation tracks the half-life) | I.HYPE.label, name | B.planted | P1 |
+| M5.2.a | How many independent observations do I have for 12-month labels over 10 years of monthly data? | X | C6 | I.M.horizon → MAGNITUDE (≈ T/h non-overlapping periods; overlap inflates apparent sample size) | stance | B.identity | P1 |
+| M5.2.b | Do my multi-horizon labels need different purging and embargo windows? | J | C6 | I.M.horizon → purge window grows with horizon (LEVEL) | — | B.ldp2018 | P2 |
+| M5.3.a | Which horizon should I trade on given turnover costs? | J | C6 | I.M.costs → DIRECTIONAL (longer horizon as costs rise) | stance | B.gp2013 | P2 |
+| M5.4.a | How do I combine fast- and slow-decaying signals into one portfolio? | M+P | C6 C7 | I.M.costs → DIRECTIONAL (slower signals weighted more as costs rise); trade partially towards an aim portfolio | hype | B.gp2013 | P2 |
 
 **M6 Validation and evaluation**
 
@@ -1723,8 +1729,9 @@ Quants and ML engineers ask coding agents to implement, fix or refactor. Each ta
 | K.M.2 | Purged k-fold cross-validation with embargo | HT.PURGE | M6.1 | P1 |
 | K.M.3 | Pairwise ranking loss and model in PyTorch | HT.ANTI, HT.TRANS | M3.2 | P1 |
 | K.M.4 | Forward-return targets including delistings | HT.SURV, HT.ALIGN, HT.COMPOUND | M4 | P1 |
-| K.M.5 | Multi-horizon target construction | HT.COMPOUND, HT.ALIGN | M5.1 | P2 |
+| K.M.5 | Multi-horizon target construction (1d to 12m), with horizon-specific purge windows | HT.COMPOUND, HT.ALIGN, HT.PURGE | M5.1, M5.2 | P1 |
 | K.M.6 | Fix this training pipeline (planted shuffled CV) | HT.PURGE | M6.1 | P1 |
+| K.M.7 | IC decay profile across horizons, and the implied half-life | HT.ALIGN, HT.REF (planted half-life recovered), HT.MONO | M5.1.b | P1 |
 
 K.M.3 needs PyTorch, which is already a repo dependency. It runs in a separate, larger sandbox image, pinned by digest.
 
@@ -1737,7 +1744,7 @@ K.M.3 needs PyTorch, which is already a repo dependency. It runs in a separate, 
 | B.identity | Accounting or mathematical identity: DuPont, CCC, TERP, accretion, coverage, Marchenko–Pastur edge, log-return additivity, filtered vs smoothed estimation | Derivation | established |
 | B.planted | Ground truth planted by the context generator | Construction | established |
 | B.mandate | The prompt-visible mandate | Construction | established |
-| B.conv | Conventional practice, recorded in a checklist reviewed by the expert panel **[D-10]** | Expert | conventional |
+| B.conv | Conventional practice, recorded in a checklist signed off by the expert panel (§T10.6) | Expert | conventional |
 | B.jt1993 | Jegadeesh & Titman (1993), *J. Finance* 48(1) | Empirical | established |
 | B.pead | Bernard & Thomas (1989), *J. Accounting Research* 27 (Suppl.) | Empirical | established |
 | B.sloan1996 | Sloan (1996), *The Accounting Review* 71(3) | Empirical | established |
@@ -1772,7 +1779,7 @@ K.M.3 needs PyTorch, which is already a repo dependency. It runs in a separate, 
 | B.cao2007 | Cao et al. (2007), ICML (ListNet) | Method | established |
 | B.ldp2018 | López de Prado (2018), *Advances in Financial Machine Learning*, Wiley | Method | conventional |
 | B.shumway1997 | Shumway (1997), *J. Finance* 52(1) | Empirical | established |
-| B.ns1987, B.dl2006 | Nelson & Siegel (1987), *J. Business* 60(4); Diebold & Li (2006), *J. Econometrics* 130(2) | Method | conventional |
+| B.gp2013 | Gârleanu & Pedersen (2013), *J. Finance* 68(6) | Method | established |
 | B.lim2024 | Liu et al. (2024), *TACL* 12 ("Lost in the middle") | LLM behaviour | Motivates I.PRES.order; never an oracle |
 | B.syc2023 | Sharma et al. (2023), arXiv:2310.13548 (ICLR 2024) | LLM behaviour | Motivates I.USER.stance; never an oracle |
 | B.gl2024 | Glasserman & Lin (2024), *J. Financial Data Science* 6(1) | LLM behaviour | Motivates I.TIME.date and I.ID.name; never an oracle |
@@ -1789,7 +1796,9 @@ Rules:
 | Priority | Meaning | Mode |
 |---|---|---|
 | P1 | Frequently asked, with a deterministic or established oracle | Confirmatory candidate |
-| P2 | Frequently asked, but the oracle is conventional or scoring needs a calibrated semantic evaluator | Confirmatory after the checklist **[D-10]** and calibration **[D-3]** |
+| P2 | Frequently asked, but the oracle is conventional or scoring needs a calibrated semantic evaluator | Confirmatory after panel sign-off (§T10.6) and calibration **[D-3]** |
+
+Once survey weights exist (§T10.3), "frequently asked" means the item is in the top two weight tertiles of its domain. Priorities are then recomputed by `taxonomy coverage` and committed with the weights.
 | P3 | Rarely asked, or no defensible oracle | Discovery only |
 
 **Coverage.** `financial-harness taxonomy coverage` writes `taxonomy/COVERAGE.md`: a domain × interaction × assessment-mode matrix with item counts by status (specified, implemented, validated). The same matrix appears in every comparison report (§32A.7).
@@ -1797,7 +1806,7 @@ Rules:
 | Wave | Items | Rationale |
 |---|---|---|
 | V1 | S1–S5 = F1.1.a, F6.1.b, Q3.1.a, M6.4.a, K.M.1 | Already specified (§35) |
-| V1.1 | F3.2.a, F3.4.a, F3.6.a, F3.6.c, F3.7.a, F4.2.a, F5.2.a, F6.1.a, F6.2.c, F7.3.b, F7.3.d, Q1.1.c, Q1.3.a, Q2.2.b, Q5.1.b, M3.2.a, M4.3.a, M6.1.a, K.Q.1, K.Q.4, K.Q.7, K.M.2, K.M.3, K.M.4 | Deterministic or established oracles. Covers all eight interaction types and all three domains |
+| V1.1 | F3.2.a, F3.4.a, F3.6.a, F3.6.c, F3.7.a, F4.2.a, F5.2.a, F6.1.a, F6.2.c, F7.3.b, F7.3.d, Q1.1.c, Q1.3.a, Q2.2.b, Q5.1.b, M3.2.a, M4.3.a, M5.1.a, M5.1.b, M5.2.a, M6.1.a, K.Q.1, K.Q.4, K.Q.7, K.M.2, K.M.3, K.M.4, K.M.7 | Deterministic or established oracles. Covers all eight interaction types and all three domains |
 | V2 | Remaining P1 and P2 | Needs checklists and calibration |
 | V3 | P3 | Discovery |
 
@@ -1836,6 +1845,85 @@ Rules:
 
 ---
 
+## T10. Practitioner survey and expert panel
+
+### T10.1 Roles
+
+The same role codes are used three ways: as survey strata, as expert-panel seats, and as the FAQ `asker` values (§T1).
+
+| Code | Role | Survey routing (items rated) | Panel responsibilities |
+|---|---|---|---|
+| `quant_analyst` | Quant finance analyst | Q, M5, M6, §T6 | Q checklists; review of §T6 hidden tests |
+| `quant_pm` | Quant portfolio manager | Q, M, F1 | Q and M checklists; quant mandates |
+| `fundamental_analyst` | Fundamental stock analyst | F | F checklists; realism of contexts C1–C5 |
+| `fundamental_pm` | Discretionary fundamental portfolio manager | F | F checklists; fundamental mandates (B.mandate, D-4) |
+| `curriculum_author` | CFA Institute learning content creator | F, Q | Definitions and terminology (B.identity items, §T0 terminology); F and Q checklists |
+| `pension_cio` | Pension fund CIO | F1, F4, Q3, Q5, Q6 | Mandate texts; §T7 confidence ratings; anchors for the survey's stakes scale |
+| `ml_architect` | ML architect | M, Q6 | M checklists |
+| `ml_developer` | ML developer | M, §T6 | M checklists; §T6 tasks and hidden tests |
+
+### T10.2 Survey instrument
+
+- **Routing:** each respondent rates only the items routed to their role, about 30–50 items. Target completion time is 20 minutes or less.
+- **Three closed questions per item:**
+  1. **Frequency** — "How often do you, or people in your role, ask an LLM or coding agent this kind of question?" Answers map to asks per month: never 0, yearly 1/12, quarterly 1/3, monthly 1, weekly 4.33, daily 21.7.
+  2. **Stakes** — "If the answer were wrong and acted on, how costly would it be?" Scale 1 (trivial) to 5 (severe: capital loss, or client or regulatory consequences).
+  3. **Channel** — chat LLM, coding agent, both, or neither.
+- **Two open questions per category:**
+  4. "Write the question the way you would actually type it." These responses become candidate paraphrases (§T10.4).
+  5. "What do you ask that is missing here?" These become candidate new items (§T10.4).
+- **Respondent profile:** role, years-of-experience band, firm type (asset manager, asset owner, hedge fund, bank, education, other), and optionally an AUM band. Names, firm names and contact details are never stored with responses.
+- **Versioning:** the instrument carries a `survey_version`. Its item IDs are the FAQ IDs, so weights map back without manual matching. `financial-harness taxonomy survey-export` generates the instrument as CSV and JSON for any survey tool.
+- **Pilot:** at least one respondent per role before release. Ambiguous items are rewritten, and pilot responses are discarded.
+
+### T10.3 Weights
+
+`financial-harness taxonomy weights --responses PATH` computes the weights.
+
+1. **Per item i and role r:**
+   - f̄ᵢᵣ = mean asks per month;
+   - s̄ᵢᵣ = mean stakes.
+2. **Item score:** uᵢ = mean, over the roles r routed to i, of f̄ᵢᵣ · s̄ᵢᵣ. Averaging across roles stops one large respondent group from dominating.
+3. **Weight:** wᵢ = uᵢ / Σⱼ uⱼ, normalised within each domain (F, Q, M, K).
+4. **Uncertainty:** 2,000 seeded bootstrap resamples of respondents within each role. Report each weight's 90% interval and how stable its tertile membership is.
+5. **Threshold [D-12]:** weights are used only when there are at least 5 completed responses in each of at least 6 of the 8 roles. Otherwise every weight stays 1.
+6. **Uses:**
+   - priority tertiles (§T8);
+   - weighted coverage in `COVERAGE.md`;
+   - weighted aggregation in cross-run comparisons, always shown alongside the unweighted figure.
+
+   Weights never enter the statistics of a single experiment (§23).
+7. **Output:** `taxonomy/weights.yaml` is committed. It holds the survey version, n per role, wᵢ with its interval, and channel shares. Raw responses never enter the repository.
+
+### T10.4 Feeding the survey back into the taxonomy
+
+- **De-duplication:** two panel members de-duplicate open-text proposals and map each to the nearest category.
+- **Promotion:** a proposal raised by at least 3 respondents from at least 2 roles is drafted as a new item with status `specified`. It must still pass the §T1 testability rule.
+- **Phrasings:** respondents' phrasings become paraphrase-family candidates (§T2.4) only after rewriting to remove anything identifying, and after passing the §9.1 neutrality checks.
+- **Release tagging:** each taxonomy release records the survey version it reflects.
+
+### T10.5 Survey data handling
+
+- **Collection:** anonymous. The instrument states the purpose, the retention period, and that aggregate results may be published.
+- **Screening:** before storage, free text is screened for names of people, firms, funds, holdings and positions, and those are removed.
+- **Storage:** raw responses are kept outside the repository with restricted access. Only aggregates enter `weights.yaml`.
+
+### T10.6 Expert panel
+
+- **Composition [D-13]:** at least one named member per role in §T10.1. Members declare conflicts of interest (e.g. employment by a provider under test) and recuse themselves from affected items.
+- **Scope:** `B.conv` checklists, mandate texts (D-4) and §T7 confidence ratings, assigned by the role mapping in §T10.1.
+- **Sign-off rule:** each checklist, mandate and confidence rating needs approval from at least 2 members, from at least 2 different mapped roles.
+- **Blind first pass:**
+  - For M- and J-type oracles, each member picks the correct option independently, without seeing other members' answers or any model output.
+  - If fewer than 2/3 of reviewers agree on one option, the basis becomes `contested` and the item runs in DISCOVERY mode.
+- **Agreement:** Fleiss' κ per domain is reported in `COVERAGE.md`.
+- **Record and versioning:** disagreements are recorded in the checklist file with each reviewer's rationale. Changing an approved item is an oracle version change (§17) and needs fresh sign-off.
+- **Blinding:** panel members do not see target-model outputs on an item before signing it off. This stops oracles being fitted to observed behaviour.
+
+`taxonomy/panel.yaml` holds the seats, roles, members, conflict declarations and sign-off log.
+
+---
+
 ## 36. Automated tests (required for V1)
 
 - **Unit:**
@@ -1865,6 +1953,12 @@ Rules:
   - Each context generator (§T3) has property tests: planted ground truth is recoverable from the rendered text by the deterministic scorer (round-trip). Accounting identities hold in C1, TERP and accretion are exact in C3, and DGP parameters are recovered within tolerance in C7.
   - D-type scoring: a perfect oracle response scores F1 = 1, an empty response scores recall 0, and a response citing a non-planted item counts as a false positive.
   - Every hidden test in §T6.1 has a known-bad and a known-good reference solution. The bad one MUST fail and the good one MUST pass.
+  - Survey weights, on synthetic response files:
+    - role balancing: duplicating one role's respondents leaves the weights unchanged;
+    - the §T10.3 threshold falls back to weight 1;
+    - the bootstrap is deterministic under its seed;
+    - routing exports only the items mapped to each role.
+  - The panel sign-off rule rejects a checklist approved by fewer than 2 members or by members from a single role.
 - **Reporting:**
   - Schema validation of `summary.json` and every CSV.
   - Numbers-traceability test (§32A.8).
@@ -1934,7 +2028,7 @@ Attribution[reasoning_before]: π_R 0.61 [0.54, 0.68], |R| 98, f₀·N 9 → VER
 | M5 | Sandbox, S5 | Sandbox tests pass in CI |
 | M6 | S2, semantic calibration, attribution axis | κ report produced; S2 golden passes |
 | M7 | Discovery → confirmation workflow; legacy as discovery engine | Leakage check between corpora passes |
-| M8 | Part II registry (`faq.yaml`, interventions, bases, `taxonomy` CLI) and the generators C1–C9 | `taxonomy validate` passes; generator round-trip tests pass |
+| M8 | Part II registry (`faq.yaml`, interventions, bases, `taxonomy` CLI), generators C1–C9, survey export and weights, `panel.yaml` sign-off checks | `taxonomy validate` passes; generator round-trip and weight tests pass; instrument exported for the pilot |
 | M9 | V1.1 wave (§T8): the remaining shared families, §T6 tasks and hidden tests | Every V1.1 item reaches `implemented`, with a golden test per family |
 
 ---
@@ -1951,9 +2045,11 @@ Attribution[reasoning_before]: π_R 0.61 [0.54, 0.68], |R| 98, f₀·N 9 → VER
 | D-6 | Docker unavailable on target machines | Docker required; fail closed | S5 outside CI |
 | D-7 | Provider data policy and regions (`provider_policy.yaml`), including whether China-region endpoints (Qwen `cn-beijing`, Kimi `cn`) are allowed | Synthetic data only to external providers; Qwen Singapore and Kimi international endpoints | Any non-synthetic run |
 | D-8 | Report branding (palette, logo) | §32A.6 reference palette; no logo | Nothing |
-| D-9 | Source of FAQ frequency weights: internal anonymised LLM / coding-agent query logs, or a practitioner survey | Weight 1 for every item | Weighted coverage and headline aggregation only |
-| D-10 | Expert panel for `B.conv` checklists: members, sign-off rule | None; ≥ 2 reviewers and documented disagreements | P2 items moving to confirmatory |
-| D-11 | Meaning and priority of "term structure" (M5.1 multi-horizon returns vs M5.2 yield-curve features) | Both registered; M5.1 at P2, M5.2 at P3 | Nothing |
+| D-9 | Source of FAQ frequency weights | **Resolved:** practitioner survey (§T10.2–§T10.5) | — |
+| D-10 | Expert panel composition | **Resolved:** eight roles (§T10.1); sign-off rule in §T10.6 | — |
+| D-11 | Meaning of "term structure" | **Resolved:** multi-horizon return forecasting (M5); yield-curve features out of scope | — |
+| D-12 | Survey sample threshold and distribution channel | ≥ 5 completed responses in each of at least 6 of the 8 roles before weights are used; target 10 per role | Weighted reporting only |
+| D-13 | Named panel members (one or more per role) and conflict-of-interest declarations | None | P2 items moving to confirmatory; §T7 confidence ratings |
 
 ---
 
